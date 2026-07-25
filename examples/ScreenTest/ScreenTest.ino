@@ -1,18 +1,24 @@
 /*
   StepScreen ScreenTest
 
-  Display-only validation for the 1.3" SH1106 OLED (128x64, I2C).
-  Steps through a sequence (~2s each) to verify the full panel is
-  usable and the StepScreen layout zones land where expected:
+  Two-phase hardware check for the 1.3" SH1106 OLED (128x64, I2C) and
+  the EC11 encoder + three buttons.
 
+  Phase 1 -- display validation (~2s per step, runs in setup):
     1. Full 128x64 border (catches SH1106 column-offset clipping)
     2. Corner markers at (0,0), (127,0), (0,63), (127,63)
     3. Layout guides with zone labels
     4. Fill patterns in each zone (info bar, content, action column)
-    5. Display inversion check, then a final composed UI frame
+    5. Display inversion check
 
-  No encoder ISR is required for this example. Board: Adafruit Feather
-  M0 Adalogger (or compatible). Wiring: OLED SDA->20, SCL->21, 3.3V, GND.
+  Phase 2 -- interactive control check (runs in loop):
+    - Rotate encoder: updates the counter and a horizontal bar
+    - Hold any button: highlights its label in the action column
+    - Press any button: shows a one-shot message in the content area
+    - All activity is also reported over Serial
+
+  Board: Adafruit Feather M0 Adalogger (or compatible).
+  Wiring: OLED SDA->20, SCL->21, 3.3V, GND.
 */
 
 #include <StepScreen.h>
@@ -20,25 +26,14 @@
 StepScreen screen;
 
 #define STEP_MS 2000
+#define EVENT_HOLD_MS 1500
 
-void setup() {
-  Serial.begin(115200);
-  delay(1000); // give USB serial a moment (no while(!Serial) so it runs on battery)
+int32_t encoderValue = 0;
+int8_t lastEncoderDir = 0; // -1, 0, +1 (shown for one frame after rotation)
+char lastEvent[20] = "";
+uint32_t lastEventMs = 0;
 
-  if (!screen.begin()) {
-    Serial.println("StepScreen: display not found at I2C 0x3C!");
-    pinMode(PIN_LED_RED, OUTPUT);
-    while (1) { // fast-blink the red LED on failure
-      digitalWrite(PIN_LED_RED, HIGH);
-      delay(100);
-      digitalWrite(PIN_LED_RED, LOW);
-      delay(100);
-    }
-  }
-  Serial.println("StepScreen: display OK, starting test sequence");
-
-  StepScreenDisplay &d = screen.display();
-
+void runDisplayTests(StepScreenDisplay &d) {
   // 1. Full-screen border: all four edges should be fully visible
   Serial.println("Step 1: full 128x64 border");
   d.clearDisplay();
@@ -90,25 +85,115 @@ void setup() {
   d.display();
   delay(STEP_MS);
 
-  // 5. Inversion check, then hold a final composed UI frame
-  Serial.println("Step 5: invert + final frame");
+  // 5. Inversion check
+  Serial.println("Step 5: invert check");
   d.invertDisplay(true);
   delay(1000);
   d.invertDisplay(false);
   delay(500);
+}
 
+void noteEvent(const char *label) {
+  strncpy(lastEvent, label, sizeof(lastEvent) - 1);
+  lastEvent[sizeof(lastEvent) - 1] = '\0';
+  lastEventMs = millis();
+  Serial.println(label);
+}
+
+void drawInteractiveUI(StepScreenDisplay &d, bool back, bool push, bool confirm) {
   d.clearDisplay();
-  d.drawInfoBar("ScreenTest");
-  d.drawActionColumn(false, false, false);
-  d.setCursor(STEPSCREEN_CONTENT_X, STEPSCREEN_CONTENT_Y + 8);
-  d.println("All zones drawn.");
-  d.println("If every edge and");
-  d.println("corner was visible,");
-  d.println("the panel is good.");
+  d.drawInfoBar("Controls", back);
+  d.drawActionColumn(back, push, confirm);
+
+  // Encoder value (large)
+  d.setTextSize(1);
+  d.setCursor(STEPSCREEN_CONTENT_X, STEPSCREEN_CONTENT_Y + 2);
+  d.print("Encoder:");
+  if (lastEncoderDir < 0) {
+    d.print(" <<");
+  } else if (lastEncoderDir > 0) {
+    d.print(" >>");
+  }
+
+  d.setTextSize(2);
+  d.setCursor(STEPSCREEN_CONTENT_X + 4, STEPSCREEN_CONTENT_Y + 12);
+  d.print(encoderValue);
+  d.setTextSize(1);
+
+  // Bar tracks encoder position (wraps 0..99)
+  const int16_t barY = STEPSCREEN_CONTENT_Y + 30;
+  const int16_t barH = 8;
+  int32_t wrapped = encoderValue % 100;
+  if (wrapped < 0)
+    wrapped += 100;
+  const int16_t fillW =
+      map((int16_t)wrapped, 0, 99, 0, STEPSCREEN_CONTENT_W - 2);
+
+  d.drawRect(STEPSCREEN_CONTENT_X, barY, STEPSCREEN_CONTENT_W, barH,
+             SH110X_WHITE);
+  if (fillW > 0) {
+    d.fillRect(STEPSCREEN_CONTENT_X + 1, barY + 1, fillW, barH - 2,
+               SH110X_WHITE);
+  }
+
+  // One-shot press feedback
+  d.setCursor(STEPSCREEN_CONTENT_X, STEPSCREEN_CONTENT_Y + 42);
+  if (lastEvent[0] != '\0' && (millis() - lastEventMs) < EVENT_HOLD_MS) {
+    d.print(lastEvent);
+  } else {
+    d.print("Press a button...");
+  }
+
   d.display();
-  Serial.println("ScreenTest complete");
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000); // give USB serial a moment (no while(!Serial) so it runs on battery)
+
+  if (!screen.begin()) {
+    Serial.println("StepScreen: display not found at I2C 0x3C!");
+    pinMode(PIN_LED_RED, OUTPUT);
+    while (1) { // fast-blink the red LED on failure
+      digitalWrite(PIN_LED_RED, HIGH);
+      delay(100);
+      digitalWrite(PIN_LED_RED, LOW);
+      delay(100);
+    }
+  }
+
+  Serial.println("StepScreen: display OK, starting test sequence");
+  runDisplayTests(screen.display());
+
+  // --- STEPSCREEN ENCODER ISR SETUP (copy into setup()) ---
+  STEPSCREEN_ATTACH_ENCODER_ISRS();
+  // --- END STEPSCREEN ENCODER ISR SETUP ---
+
+  noteEvent("Display OK");
+  Serial.println("ScreenTest: interactive control check -- rotate encoder, press buttons");
 }
 
 void loop() {
-  // Hold the final frame
+  StepScreenInput &in = screen.input();
+
+  int32_t delta = in.getEncoderDelta();
+  if (delta != 0) {
+    encoderValue += delta;
+    lastEncoderDir = (delta > 0) ? 1 : -1;
+  } else {
+    lastEncoderDir = 0;
+  }
+
+  uint8_t events = in.pollButtons();
+  if (events & STEPSCREEN_EVT_BACK)
+    noteEvent("Back pressed");
+  if (events & STEPSCREEN_EVT_PUSH)
+    noteEvent("Sel pressed");
+  if (events & STEPSCREEN_EVT_CONFIRM)
+    noteEvent("OK pressed");
+
+  drawInteractiveUI(screen.display(), in.readBack(), in.readPush(),
+                    in.readConfirm());
+
+  delay(16); // ~60 fps refresh cap
 }

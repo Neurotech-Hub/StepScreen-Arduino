@@ -36,4 +36,18 @@
 // #define PIN_LED_RED 13
 // #define PIN_VBAT A7
 
+// --- User I/O ---
+// #define PIN_USER_LED1 13
+// #define PIN_USER_LED2 A1
+// #define PIN_EXT_LED A2
+// #define PIN_BEAM_DET A4
+// #define PIN_AUX_IN A5
+
+// --- TMC2209 stepper ---
+// #define PIN_MOTOR_STEP 5
+// #define PIN_MOTOR_DIR 6
+// #define PIN_MOTOR_EN 9
+// #define STEPSCREEN_MOTOR_MICROSTEPS 16
+// #define STEPSCREEN_MOTOR_FULL_STEPS 200
+
 #endif // STEPSCREEN_PINS_OVERRIDE_H

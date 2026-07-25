@@ -4,6 +4,25 @@ Arduino UI library for a custom board modeled after the [Adafruit Feather M0 Ada
 
 Built on the [Adafruit SH110X](https://github.com/adafruit/Adafruit_SH110X) driver, so the full Adafruit_GFX API is available alongside the StepScreen layout helpers.
 
+## Library structure
+
+Source lives under `src/` (Arduino's modern layout). Only files in `src/` are compiled as library code, which keeps the root clean as the library grows:
+
+```
+StepScreen/
+├── library.properties
+├── README.md
+├── StepScreenPins_override.example.h   # pin override template (not compiled)
+├── src/                                # library source
+│   ├── StepScreen.h                    # main include
+│   └── ...
+└── examples/
+    ├── ScreenTest/
+    └── BasicUI/
+```
+
+Sketches still use `#include <StepScreen.h>` — the IDE adds `src/` to the include path automatically.
+
 ## Hardware
 
 - **Board**: ATSAMD21G18 @ 48 MHz, 3.3V logic (select "Adafruit Feather M0" in the Arduino IDE)
@@ -31,7 +50,32 @@ Screen module defaults (from `StepScreenPins.h`):
 | `PIN_BTN_CONFIRM` | A0 | SCREEN_CONFIRM (confirm button) |
 | `PIN_BTN_PUSH` | A3 | SCREEN_PUSH (encoder shaft push) |
 
-Board baseline (from `StepScreenBoard.h`, following the Adalogger M0): `PIN_SD_CS` 4, `PIN_SD_CD` 7, `PIN_LED_GREEN` 8, `PIN_LED_RED` 13, `PIN_VBAT` A7, I2C on 20/21.
+Board I/O (from `StepScreenBoard.h`):
+
+| Symbol | Default pin | Notes |
+|---|---|---|
+| `PIN_SD_CS` | 4 | microSD chip select |
+| `PIN_SD_CD` | 7 | card detect (HIGH = inserted) |
+| `PIN_LED_GREEN` | 8 | Adalogger green LED (SD area) |
+| `PIN_LED_RED` / `PIN_USER_LED1` | 13 | Adalogger red LED; same pin on this board |
+| `PIN_USER_LED2` | A1 | user indicator LED |
+| `PIN_EXT_LED` | A2 | external LED via N-MOSFET (220 Ω gate, 10 kΩ pulldown); HIGH = ON |
+| `PIN_BEAM_DET` | A4 | photodetector; **external pull-up** — use `INPUT`, no internal pullup |
+| `PIN_AUX_IN` | A5 | general-purpose digital input |
+| `PIN_VBAT` | A7 (pin 9) | battery voltage divider (reads VBAT/2) |
+| `PIN_I2C_SDA` / `PIN_I2C_SCL` | 20 / 21 | Wire |
+
+Optional helpers: `#include <StepScreenIO.h>` for output registry and input sampling; `#include <StepScreenIODisplay.h>` to render I/O status on the OLED. See the **IOTest** example.
+
+TMC2209 stepper (standalone step/dir, from `StepScreenBoard.h`):
+
+| Symbol | Default pin | Notes |
+|---|---|---|
+| `PIN_MOTOR_STEP` | 5 | STEP pulse |
+| `PIN_MOTOR_DIR` | 6 | direction |
+| `PIN_MOTOR_EN` | 9 | ~EN, active LOW (LOW = enabled) |
+
+MS1 and MS2 are tied HIGH on the module (1/16 microstepping). CLK is tied GND (internal clock). UART/DIAG are not used. `STEPSCREEN_MOTOR_STEPS_PER_REV` defaults to 3200 (200 full steps × 16 microsteps).
 
 All buttons are read active LOW with internal pullups; no external resistors are needed. Swap `PIN_ENC_A`/`PIN_ENC_B` to flip the encoder's rotation sign.
 
@@ -112,10 +156,44 @@ Buttons are polled and debounced (no interrupts needed): `readBack()` / `readPus
 
 SAMD21 note: pins 12 and 10 use separate EXTINT lines, so the default mapping is safe. If you remap the encoder, the two pins must not share an EXTINT line.
 
+## TMC2209 motor driver
+
+`StepScreenMotor` drives a BIGTREETECH TMC2209 in standalone step/dir mode (no UART). Include it independently of the display stack:
+
+```cpp
+#include <StepScreenMotor.h>
+
+StepScreenMotor motor;
+
+void setup() {
+  motor.begin();
+  motor.enable();
+  motor.moveStepsSigned(320); // 1/10 rev forward at 1/16 microstepping
+}
+
+void loop() {
+  motor.setSpeed(400.0f);  // steps/sec; sign sets direction
+  motor.runSpeed();        // call every loop() iteration
+}
+```
+
+| Call | Purpose |
+|---|---|
+| `begin()` | Configure STEP/DIR/~EN pins; driver starts disabled |
+| `enable()` / `disable()` | Toggle ~EN (active LOW) |
+| `setDirection(fwd)` / `step()` | Set DIR and issue one microstep pulse |
+| `moveSteps(n, delayUs)` | Blocking move in current direction |
+| `moveStepsSigned(n, delayUs)` | Blocking move; sign sets direction |
+| `setSpeed(stepsPerSec)` / `runSpeed()` | Non-blocking continuous motion |
+| `getPosition()` / `resetPosition()` | Signed microstep counter |
+| `getStepCount()` | Total pulses issued since `begin()` |
+
 ## Examples
 
-- **ScreenTest** -- display-only validation. Steps through a full-screen border, corner markers, layout guides, and zone fills so you can confirm the entire 128x64 area is visible with no SH1106 offset clipping. Run this first on new hardware.
+- **ScreenTest** -- display validation followed by an interactive control check (encoder + all three buttons). Run this first on new hardware.
 - **BasicUI** -- interactive demo: the encoder drives a counter, and each button highlights its action-column label. Includes the encoder ISR block.
+- **MotorTest** -- TMC2209 step/dir exercise without a motor connected. Blocking and non-blocking moves with Serial reporting; green LED blinks on each STEP pulse.
+- **IOTest** -- auto-walks each board output (solo on/off) while displaying live inputs on the OLED. Encoder/buttons switch pages, toggle outputs, or force all on/off.
 
 ## API summary
 
