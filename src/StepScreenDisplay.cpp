@@ -27,9 +27,20 @@ void StepScreenDisplay::drawInfoBar(const char *title, bool highlightBack) {
 
 void StepScreenDisplay::drawActionColumn(bool backActive, bool pushActive,
                                          bool confirmActive) {
-  drawActionLabel("Back", STEPSCREEN_BTN_BACK_Y, backActive);
-  drawActionLabel("Sel", STEPSCREEN_BTN_PUSH_Y, pushActive);
-  drawActionLabel("OK", STEPSCREEN_BTN_CONFIRM_Y, confirmActive);
+  const StepScreenActionLabels defaults = {"Back", "Sel", "OK"};
+  drawActionColumn(defaults, backActive, pushActive, confirmActive);
+}
+
+void StepScreenDisplay::drawActionColumn(const StepScreenActionLabels &labels,
+                                         bool backActive, bool pushActive,
+                                         bool confirmActive) {
+  drawActionLabel(labels.back ? labels.back : "----", STEPSCREEN_BTN_BACK_Y,
+                  labels.back != nullptr && backActive);
+  drawActionLabel(labels.push ? labels.push : "----", STEPSCREEN_BTN_PUSH_Y,
+                  labels.push != nullptr && pushActive);
+  drawActionLabel(labels.confirm ? labels.confirm : "----",
+                  STEPSCREEN_BTN_CONFIRM_Y,
+                  labels.confirm != nullptr && confirmActive);
 }
 
 void StepScreenDisplay::clearContentArea() {
@@ -64,9 +75,15 @@ void StepScreenDisplay::drawActionLabel(const char *label, int16_t y,
                                         bool active) {
   const int16_t w = 6 * (int16_t)strlen(label); // 6px advance per char
   const int16_t x = STEPSCREEN_W - w - 1;       // right-justified
+  const int16_t boxY = (y > 0) ? y - 1 : 0;
+
+  // Clear this label's strip inside the action column so labels can be
+  // redrawn (e.g. the labeled column replacing the info bar's "Back").
+  fillRect(STEPSCREEN_ACTION_COL_X + 1, boxY,
+           STEPSCREEN_W - STEPSCREEN_ACTION_COL_X - 1, 9, SH110X_BLACK);
+
   setTextSize(1);
   if (active) {
-    const int16_t boxY = (y > 0) ? y - 1 : 0;
     fillRect(x - 2, boxY, w + 3, 9, SH110X_WHITE);
     setTextColor(SH110X_BLACK);
   } else {

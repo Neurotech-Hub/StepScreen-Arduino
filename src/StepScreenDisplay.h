@@ -19,6 +19,15 @@
 #include "StepScreenLayout.h"
 #include "StepScreenPins.h"
 
+// Per-screen action column labels. nullptr means the button is not
+// available on this screen and is drawn as "----" (never highlighted).
+// Keep labels to 4 characters or fewer to fit the 28px action column.
+struct StepScreenActionLabels {
+  const char *back;
+  const char *push;
+  const char *confirm;
+};
+
 class StepScreenDisplay : public Adafruit_SH1106G {
 public:
   StepScreenDisplay(TwoWire *wire = &Wire)
@@ -38,6 +47,11 @@ public:
   // drawn inverted (white box, black text).
   void drawActionColumn(bool backActive, bool pushActive,
                         bool confirmActive);
+
+  // Same, with per-screen labels; nullptr entries render as "----"
+  // (unavailable) and ignore the corresponding active flag.
+  void drawActionColumn(const StepScreenActionLabels &labels, bool backActive,
+                        bool pushActive, bool confirmActive);
 
   // Clears only the content zone and parks the cursor at its origin.
   void clearContentArea();

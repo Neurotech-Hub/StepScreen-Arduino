@@ -37,6 +37,7 @@ Install via the Arduino Library Manager:
 - Adafruit SH110X
 - Adafruit GFX Library
 - Adafruit BusIO
+- AccelStepper (used by `StepScreenStepper`)
 
 ## Pin map
 
@@ -188,12 +189,76 @@ void loop() {
 | `getPosition()` / `resetPosition()` | Signed microstep counter |
 | `getStepCount()` | Total pulses issued since `begin()` |
 
+## Application motion: StepScreenStepper (AccelStepper)
+
+For application motion — acceleration, non-blocking moves, speed presets — use `StepScreenStepper`, a thin wrapper around [AccelStepper](https://www.airspayce.com/mikem/arduino/AccelStepper/) in DRIVER mode with the board's pins and ~EN polarity preconfigured. `StepScreenMotor` remains the raw pin-level option for hardware bring-up.
+
+```cpp
+#include <StepScreenStepper.h>
+
+StepScreenStepper stepper;
+
+void setup() {
+  stepper.begin();          // driver starts disabled
+  stepper.enable();
+  stepper.moveSigned(3200); // one revolution at 1/16 microstepping
+}
+
+void loop() {
+  stepper.run(); // non-blocking; call every loop() iteration
+}
+```
+
+| Call | Purpose |
+|---|---|
+| `begin()` | Configure pins + defaults; driver starts disabled |
+| `enable()` / `disable()` | Toggle ~EN; `disable()` also cancels pending motion |
+| `jogSteps(n)` / `moveSigned(n)` | Relative moves (poll `run()` until done) |
+| `run()` | Step generator; returns `true` while a move is pending |
+| `setSpeedPreset(p)` / `nextSpeedPreset()` | Low / Med / Fast presets (`STEPSCREEN_SPEED_*_SPS`, overridable) |
+| `setMaxSpeed(sps)` / `setAcceleration(sps2)` | Direct control |
+| `isRunning()` / `stop()` / `currentPosition()` | Motion state |
+| `raw()` | Underlying `AccelStepper` for advanced use |
+
+Preset defaults: Low 200, Med 800, Fast 2000 microsteps/sec; acceleration 4000 microsteps/sec². Override any of them before including the header (e.g. `#define STEPSCREEN_SPEED_FAST_SPS 4000.0f`).
+
+## Menu navigation: StepScreenNav
+
+`StepScreenInput`'s 20 ms debounce handles switch bounce, but menus need more: a press that triggers a screen change must not also fire on the new screen, and a held button must not repeat. `StepScreenNav` layers both guarantees on top of the raw input:
+
+- **Transition settle** — all button edges are discarded for `STEPSCREEN_NAV_SETTLE_MS` (default 250 ms) after `enterScreen()`.
+- **Release-before-accept** — after a press is delivered, nothing more is accepted until every button has been released.
+
+```cpp
+#include <StepScreenNav.h>
+
+StepScreenNav nav;
+
+void setup() {
+  // after screen.begin() ...
+  nav.begin(&screen.input());
+}
+
+void changeScreen() {
+  nav.enterScreen(); // call on EVERY screen/mode change
+}
+
+void loop() {
+  uint8_t ev = nav.pollNavEvents();       // filtered STEPSCREEN_EVT_* bitmask
+  int32_t enc = nav.consumeEncoderDelta(); // flushed by enterScreen()
+  // nav.readBack()/readPush()/readConfirm() for UI highlights only
+}
+```
+
+Call `pollNavEvents()` exactly once per loop — it consumes the underlying edge state.
+
 ## Examples
 
 - **ScreenTest** -- display validation followed by an interactive control check (encoder + all three buttons). Run this first on new hardware.
 - **BasicUI** -- interactive demo: the encoder drives a counter, and each button highlights its action-column label. Includes the encoder ISR block.
 - **MotorTest** -- TMC2209 step/dir exercise without a motor connected. Blocking and non-blocking moves with Serial reporting; green LED blinks on each STEP pulse.
 - **IOTest** -- auto-walks each board output (solo on/off) while displaying live inputs on the OLED. Encoder/buttons switch pages, toggle outputs, or force all on/off.
+- **SyringePump** -- three-screen pump controller built on `StepScreenNav` + `StepScreenStepper`. Home (motor off), Adjust (encoder jogs the motor; OK cycles Low/Med/Fast speed), Run (send a signed step count over Serial at 115200, e.g. `3200` + newline). Demonstrates the menu debounce pattern.
 
 ## API summary
 
@@ -204,6 +269,7 @@ void loop() {
 | `screen.input()` | Buttons + encoder |
 | `drawInfoBar(title, highlightBack)` | Inverted top bar with left-aligned title |
 | `drawActionColumn(back, push, confirm)` | Right-justified Back/Sel/OK labels |
+| `drawActionColumn(labels, back, push, confirm)` | Per-screen labels via `StepScreenActionLabels`; `nullptr` renders as `----` (unavailable). Keep labels ≤ 4 chars |
 | `clearContentArea()` | Clear only the content zone, cursor to its origin |
 | `drawLayoutGuides()` | Zone borders + corner markers (for testing) |
 
