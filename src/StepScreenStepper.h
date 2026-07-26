@@ -96,6 +96,14 @@ public:
   bool run() { return _stepper.run(); }
   bool isRunning() { return _stepper.isRunning(); }
 
+  // Continuous (open-ended) motion: set a signed speed and call
+  // runSpeed() every loop instead of run(). AccelStepper applies no
+  // acceleration here -- ramp the value passed to setSpeed() yourself
+  // for gradual acceleration. Speed is clamped to setMaxSpeed().
+  void setSpeed(float stepsPerSec) { _stepper.setSpeed(stepsPerSec); }
+  float speed() { return _stepper.speed(); }
+  bool runSpeed() { return _stepper.runSpeed(); }
+
   // Decelerate to a stop as fast as the acceleration setting allows
   void stop() { _stepper.stop(); }
 

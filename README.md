@@ -259,6 +259,7 @@ Call `pollNavEvents()` exactly once per loop — it consumes the underlying edge
 - **MotorTest** -- TMC2209 step/dir exercise without a motor connected. Blocking and non-blocking moves with Serial reporting; green LED blinks on each STEP pulse.
 - **IOTest** -- auto-walks each board output (solo on/off) while displaying live inputs on the OLED. Encoder/buttons switch pages, toggle outputs, or force all on/off.
 - **SyringePump** -- three-screen pump controller built on `StepScreenNav` + `StepScreenStepper`. Home (motor off), Adjust (encoder jogs the motor; OK cycles Low/Med/Fast speed), Run (send a signed step count over Serial at 115200, e.g. `3200` + newline). Demonstrates the menu debounce pattern.
+- **Treadmill** -- rodent treadmill controller. Home shows speed (cm/s) and timeout (minutes) with the edited metric inverted (Back toggles Spd/Time, Sel toggles Fwd/Rev, encoder adjusts). Run ramps the belt to speed via `setSpeed()`/`runSpeed()`, counts down, then disables the motor and blinks DONE. Speed→steps mapping is a placeholder (`STEPSCREEN_TREADMILL_SPS_PER_CMS`).
 
 ## API summary
 
@@ -269,7 +270,7 @@ Call `pollNavEvents()` exactly once per loop — it consumes the underlying edge
 | `screen.input()` | Buttons + encoder |
 | `drawInfoBar(title, highlightBack)` | Inverted top bar with left-aligned title |
 | `drawActionColumn(back, push, confirm)` | Right-justified Back/Sel/OK labels |
-| `drawActionColumn(labels, back, push, confirm)` | Per-screen labels via `StepScreenActionLabels`; `nullptr` renders as `----` (unavailable). Keep labels ≤ 4 chars |
+| `drawActionColumn(labels, back, push, confirm)` | Per-screen labels via `StepScreenActionLabels`; `nullptr` renders as `----` (unavailable). Labels longer than 4 chars are truncated |
 | `clearContentArea()` | Clear only the content zone, cursor to its origin |
 | `drawLayoutGuides()` | Zone borders + corner markers (for testing) |
 

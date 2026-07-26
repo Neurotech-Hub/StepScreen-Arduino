@@ -1,12 +1,16 @@
 /*
   StepScreen SyringePump
 
-  Three-screen pump controller demonstrating the StepScreenNav
+  Four-screen pump controller demonstrating the StepScreenNav
   (menu-safe debouncing) and StepScreenStepper (AccelStepper/TMC2209)
   layers.
 
-  Home   -- motor disabled, welcome message.
-            Sel = Adjust screen, OK = Run screen. Back is n/a.
+  Home   -- motor disabled.
+            Back = mL size picker, Sel = Adjust, OK = Run.
+  Size   -- pick syringe volume (10/20/30/50/60 mL) with the encoder.
+            Back = Back (discard), OK = Save (keep selection).
+            Selection is stored for a future µL↔steps lookup table;
+            serial Run commands still use microsteps for now.
   Adjust -- motor enabled; encoder jogs the motor in both directions.
             OK cycles the speed preset (Low -> Med -> Fast).
             Back returns Home. Shows position, speed, encoder input.
@@ -23,9 +27,6 @@
   Note: the OLED frame transfer blocks step generation for ~20 ms, so
   the display refresh is throttled (and slowed further while a Run move
   is in progress) to keep motion smooth.
-
-  The info bar shows a datetime placeholder ("--:--") until an RTC is
-  integrated.
 
   Board: Adafruit Feather M0 Adalogger (or compatible).
 */
@@ -48,11 +49,20 @@ StepScreenStepper stepper;
 
 enum PumpScreen : uint8_t {
   SCREEN_HOME,
+  SCREEN_SIZE,
   SCREEN_ADJUST,
   SCREEN_RUN,
 };
 
 PumpScreen currentScreen = SCREEN_HOME;
+
+// Syringe size options (mL). Index is stored for a future µL↔steps table.
+static const uint8_t SYRINGE_ML_OPTIONS[] = {10, 20, 30, 50, 60};
+static const uint8_t SYRINGE_ML_COUNT =
+    sizeof(SYRINGE_ML_OPTIONS) / sizeof(SYRINGE_ML_OPTIONS[0]);
+
+uint8_t syringeMlIndex = 2; // default 30 mL
+uint8_t sizeDraftIndex = 2; // working selection on the Size screen
 
 // Run-screen serial command state
 enum RunStatus : uint8_t {
@@ -68,6 +78,8 @@ uint8_t rxLen = 0;
 int32_t lastCommandSteps = 0;
 int32_t lastEncoderDelta = 0;
 
+uint8_t syringeMl() { return SYRINGE_ML_OPTIONS[syringeMlIndex]; }
+
 // --- Screen transitions (always via these, so nav debounce applies) ---
 
 void enterHome() {
@@ -76,6 +88,15 @@ void enterHome() {
   stepper.disable();
   nav.enterScreen();
   Serial.println(F("[Home]"));
+}
+
+void enterSize() {
+  currentScreen = SCREEN_SIZE;
+  sizeDraftIndex = syringeMlIndex; // start at the saved size
+  nav.enterScreen();
+  Serial.print(F("[Size] current "));
+  Serial.print(syringeMl());
+  Serial.println(F(" mL"));
 }
 
 void enterAdjust() {
@@ -152,10 +173,35 @@ void handleSerialCommand() {
 // --- Per-screen input handling ---
 
 void handleHome(uint8_t ev) {
-  if (ev & STEPSCREEN_EVT_PUSH) {
+  if (ev & STEPSCREEN_EVT_BACK) {
+    enterSize();
+  } else if (ev & STEPSCREEN_EVT_PUSH) {
     enterAdjust();
   } else if (ev & STEPSCREEN_EVT_CONFIRM) {
     enterRun();
+  }
+}
+
+void handleSize(uint8_t ev, int32_t enc) {
+  if (ev & STEPSCREEN_EVT_BACK) {
+    // Back: discard draft
+    enterHome();
+    return;
+  }
+  if (ev & STEPSCREEN_EVT_CONFIRM) {
+    syringeMlIndex = sizeDraftIndex;
+    Serial.print(F("size saved: "));
+    Serial.print(syringeMl());
+    Serial.println(F(" mL"));
+    enterHome();
+    return;
+  }
+  if (enc != 0) {
+    int16_t next = (int16_t)sizeDraftIndex + (int16_t)enc;
+    while (next < 0) {
+      next += SYRINGE_ML_COUNT;
+    }
+    sizeDraftIndex = (uint8_t)(next % SYRINGE_ML_COUNT);
   }
 }
 
@@ -186,12 +232,52 @@ void handleRun(uint8_t ev) {
 // --- Drawing ---
 
 void drawHome(StepScreenDisplay &d) {
-  d.drawInfoBar("Ready");
-  const StepScreenActionLabels labels = {nullptr, "Adj", "Run"};
-  d.drawActionColumn(labels, false, nav.readPush(), nav.readConfirm());
+  d.drawInfoBar("-- --:--"); // datetime placeholder until RTC
+  // "mL" / "Adj" / "Run" — Back opens the size picker
+  const StepScreenActionLabels labels = {"mL", "Adj", "Run"};
+  d.drawActionColumn(labels, nav.readBack(), nav.readPush(),
+                     nav.readConfirm());
 
-  d.setCursor(STEPSCREEN_CONTENT_X, STEPSCREEN_CONTENT_Y + 10);
-  d.println("Select an option");
+  d.setTextSize(2);
+  d.setCursor(STEPSCREEN_CONTENT_X, STEPSCREEN_CONTENT_Y + 4);
+  d.print(syringeMl());
+  d.print(" mL");
+
+  d.setTextSize(1);
+  d.setCursor(STEPSCREEN_CONTENT_X, STEPSCREEN_CONTENT_Y + 28);
+  d.println("Click Run to");
+  d.println("execute uL");
+  d.println("delivery.");
+}
+
+void drawSize(StepScreenDisplay &d) {
+  d.drawInfoBar("Size");
+  // Back / ---- / Save
+  const StepScreenActionLabels labels = {"Back", nullptr, "Save"};
+  d.drawActionColumn(labels, nav.readBack(), false, nav.readConfirm());
+
+  d.setCursor(STEPSCREEN_CONTENT_X, STEPSCREEN_CONTENT_Y + 6);
+  d.println("Syringe:");
+  d.println();
+
+  // Show neighbors above/below the selected option when space allows
+  if (sizeDraftIndex > 0) {
+    d.print("  ");
+    d.print(SYRINGE_ML_OPTIONS[sizeDraftIndex - 1]);
+    d.println(" mL");
+  } else {
+    d.println();
+  }
+
+  d.print("> ");
+  d.print(SYRINGE_ML_OPTIONS[sizeDraftIndex]);
+  d.println(" mL");
+
+  if (sizeDraftIndex + 1 < SYRINGE_ML_COUNT) {
+    d.print("  ");
+    d.print(SYRINGE_ML_OPTIONS[sizeDraftIndex + 1]);
+    d.println(" mL");
+  }
 }
 
 void drawAdjust(StepScreenDisplay &d) {
@@ -257,6 +343,9 @@ void drawScreen() {
   case SCREEN_HOME:
     drawHome(d);
     break;
+  case SCREEN_SIZE:
+    drawSize(d);
+    break;
   case SCREEN_ADJUST:
     drawAdjust(d);
     break;
@@ -300,6 +389,9 @@ void loop() {
   switch (currentScreen) {
   case SCREEN_HOME:
     handleHome(ev);
+    break;
+  case SCREEN_SIZE:
+    handleSize(ev, enc);
     break;
   case SCREEN_ADJUST:
     handleAdjust(ev, enc);

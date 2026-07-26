@@ -5,21 +5,19 @@
 #include <string.h>
 
 // Fixed vertical bands — graphic above, text below, no overlap.
-static const int16_t NEURON_CY = 13;
 static const int16_t TITLE_Y = 30;
 static const int16_t CREDIT_Y = 48;
 
-// Axon path: hillock → gentle curve → terminal arbor (coords relative to soma center)
-static const int16_t AXON_PT[][2] = {
-    {5, 0}, {14, -1}, {26, 1}, {38, 0}, {50, -1}, {62, 0}, {72, 1}, {80, 0},
-};
-static const uint8_t AXON_PT_COUNT = 8;
-
-// Terminal branches (from last axon point)
-static const int16_t TERMINAL_PT[][2] = {
-    {84, -4}, {88, -6}, {86, 4},  {90, 6},  {84, 5},
-};
-static const uint8_t TERMINAL_PT_COUNT = 5;
+// Syringe geometry (horizontal, upper band y=0..24, needle to the right)
+static const int16_t SYR_CY = 12;      // centerline
+static const int16_t BARREL_X = 40;    // barrel mouth (left edge)
+static const int16_t BARREL_W = 40;
+static const int16_t BARREL_H = 12;    // y 6..17
+static const int16_t TAPER_W = 6;      // barrel-to-needle taper
+static const int16_t NEEDLE_LEN = 12;
+static const int16_t ROD_LEN = 34;     // plunger rod (handle stops at mouth)
+static const int16_t PLUNGER_MAX = 30; // seal travel in px
+static const int16_t DROP_SPAN = 18;   // droplet flight distance
 
 static bool skipRequested(StepScreenInput *input, bool skippable) {
   if (!skippable || input == nullptr) {
@@ -40,124 +38,129 @@ static void drawCentered(StepScreenDisplay &d, const char *text, int16_t y) {
   d.print(text);
 }
 
-static int16_t axonPathLength() {
-  int16_t len = 0;
-  for (uint8_t i = 1; i < AXON_PT_COUNT; i++) {
-    const int16_t dx = AXON_PT[i][0] - AXON_PT[i - 1][0];
-    const int16_t dy = AXON_PT[i][1] - AXON_PT[i - 1][1];
-    len += (int16_t)sqrt((float)(dx * dx + dy * dy));
+// detail 0..255 reveals the syringe body; plunger 0..PLUNGER_MAX is how
+// far the seal has been depressed into the barrel.
+static void drawSyringe(StepScreenDisplay &d, uint8_t detail,
+                        int16_t plunger) {
+  const int16_t top = SYR_CY - BARREL_H / 2;
+  const int16_t bottom = top + BARREL_H - 1;
+  const int16_t barrelRight = BARREL_X + BARREL_W - 1;
+  const int16_t needleBase = barrelRight + TAPER_W;
+
+  // Barrel walls sweep in left-to-right
+  const int16_t reveal =
+      detail < 120 ? (int16_t)((int32_t)BARREL_W * detail / 120) : BARREL_W;
+  if (reveal > 0) {
+    d.drawFastHLine(BARREL_X, top, reveal, SH110X_WHITE);
+    d.drawFastHLine(BARREL_X, bottom, reveal, SH110X_WHITE);
   }
-  return len;
-}
 
-static void axonPointAt(int16_t somaX, int16_t somaY, uint8_t travel,
-                        int16_t &outX, int16_t &outY) {
-  const int16_t total = axonPathLength();
-  int16_t target = (int16_t)((int32_t)total * travel / 255);
-  int16_t segStart = 0;
-
-  for (uint8_t i = 1; i < AXON_PT_COUNT; i++) {
-    const int16_t x0 = somaX + AXON_PT[i - 1][0];
-    const int16_t y0 = somaY + AXON_PT[i - 1][1];
-    const int16_t x1 = somaX + AXON_PT[i][0];
-    const int16_t y1 = somaY + AXON_PT[i][1];
-    const int16_t dx = x1 - x0;
-    const int16_t dy = y1 - y0;
-    const int16_t segLen = (int16_t)sqrt((float)(dx * dx + dy * dy));
-
-    if (target <= segStart + segLen || i == AXON_PT_COUNT - 1) {
-      const int16_t t = segLen > 0 ? target - segStart : 0;
-      outX = x0 + (int16_t)((int32_t)dx * t / segLen);
-      outY = y0 + (int16_t)((int32_t)dy * t / segLen);
-      return;
-    }
-    segStart += segLen;
+  // Open-backed mouth with finger flanges (central gap lets the rod
+  // slide through)
+  if (detail >= 120) {
+    d.drawFastVLine(BARREL_X, top - 2, 5, SH110X_WHITE);
+    d.drawFastVLine(BARREL_X, SYR_CY + 3, 5, SH110X_WHITE);
   }
-  outX = somaX + AXON_PT[AXON_PT_COUNT - 1][0];
-  outY = somaY + AXON_PT[AXON_PT_COUNT - 1][1];
-}
 
-// Myelinated axon: dashed sheath segments with gaps at nodes of Ranvier
-static void drawMyelinatedAxon(StepScreenDisplay &d, int16_t somaX, int16_t somaY,
-                               uint8_t progress) {
-  int16_t px = somaX + AXON_PT[0][0];
-  int16_t py = somaY + AXON_PT[0][1];
-  int16_t drawn = 0;
-  const int16_t total = axonPathLength();
-  const int16_t limit = (int16_t)((int32_t)total * progress / 255);
+  // Taper down to the needle
+  if (detail >= 160) {
+    d.drawLine(barrelRight, top, needleBase, SYR_CY - 1, SH110X_WHITE);
+    d.drawLine(barrelRight, bottom, needleBase, SYR_CY + 1, SH110X_WHITE);
+    d.drawFastHLine(needleBase, SYR_CY, NEEDLE_LEN, SH110X_WHITE);
+  }
 
-  for (uint8_t i = 1; i < AXON_PT_COUNT; i++) {
-    const int16_t x1 = somaX + AXON_PT[i][0];
-    const int16_t y1 = somaY + AXON_PT[i][1];
-    const int16_t dx = x1 - px;
-    const int16_t dy = y1 - py;
-    const int16_t segLen = (int16_t)sqrt((float)(dx * dx + dy * dy));
-    if (segLen == 0) {
-      px = x1;
-      py = y1;
-      continue;
-    }
+  // Plunger (thumb pad + rod + seal) and remaining fluid
+  if (detail >= 200) {
+    const int16_t sealX = BARREL_X + 2 + plunger;
+    d.fillRect(sealX, top + 2, 2, BARREL_H - 4, SH110X_WHITE);
+    d.drawFastHLine(sealX - ROD_LEN, SYR_CY, ROD_LEN, SH110X_WHITE);
+    d.fillRect(sealX - ROD_LEN - 2, SYR_CY - 5, 2, 11, SH110X_WHITE);
 
-    for (int16_t s = 0; s < segLen; s++) {
-      if (drawn >= limit) {
-        return;
-      }
-      const int16_t x = px + (int16_t)((int32_t)dx * s / segLen);
-      const int16_t y = py + (int16_t)((int32_t)dy * s / segLen);
-      // 5 px myelin, 2 px node gap
-      if ((drawn % 7) < 5) {
-        d.drawPixel(x, y, SH110X_WHITE);
-        if (dy == 0) {
-          d.drawPixel(x, y - 1, SH110X_WHITE);
-        } else {
-          d.drawPixel(x, y + 1, SH110X_WHITE);
+    // Fluid ahead of the seal, dithered so it reads as liquid (1px gap
+    // keeps it distinct from the solid seal)
+    const int16_t fluidX = sealX + 3;
+    const int16_t fluidEnd = barrelRight - 1;
+    for (int16_t x = fluidX; x < fluidEnd; x++) {
+      for (int16_t y = top + 2; y <= bottom - 2; y++) {
+        if (((x + y) & 1) == 0) {
+          d.drawPixel(x, y, SH110X_WHITE);
         }
       }
-      drawn++;
     }
-    px = x1;
-    py = y1;
   }
 }
 
-static void drawNeuron(StepScreenDisplay &d, int16_t somaX, int16_t somaY,
-                       uint8_t detail) {
-  if (detail >= 20) {
-    d.drawCircle(somaX, somaY, 4, SH110X_WHITE);
+// Droplets leaving the needle tip; phase 0..255 loops.
+static void drawDrops(StepScreenDisplay &d, uint8_t phase) {
+  const int16_t tipX = BARREL_X + BARREL_W - 1 + TAPER_W + NEEDLE_LEN + 2;
+  for (uint8_t i = 0; i < 2; i++) {
+    const uint8_t p = (uint8_t)(phase + i * 128);
+    const int16_t x = tipX + (int16_t)((int32_t)DROP_SPAN * p / 255);
+    const int16_t y = SYR_CY + (((p >> 6) & 1) ? 1 : -1); // slight wobble
+    d.fillCircle(x, y, 1, SH110X_WHITE);
   }
-  if (detail >= 50) {
-    d.drawLine(somaX - 1, somaY - 3, somaX - 8, somaY - 10, SH110X_WHITE);
-    d.drawLine(somaX + 2, somaY - 4, somaX + 9, somaY - 10, SH110X_WHITE);
-    d.drawLine(somaX - 2, somaY + 2, somaX - 7, somaY + 8, SH110X_WHITE);
+}
+
+// Treadmill geometry (horizontal side view, upper band y=0..24)
+static const int16_t TM_LEFT = 34;     // left roller center x
+static const int16_t TM_RIGHT = 94;    // right roller center x
+static const int16_t TM_BELT_TOP = 16; // belt top surface
+static const int16_t TM_BELT_BOT = 22; // belt bottom
+static const int16_t TM_ROLLER_R = 3;
+
+// detail 0..255 reveals the frame; beltPhase 0..7 scrolls the belt
+// dashes leftward; gait alternates the rodent's leg pairs.
+static void drawTreadmill(StepScreenDisplay &d, uint8_t detail,
+                          uint8_t beltPhase, bool gait) {
+  const int16_t rollerCy = (TM_BELT_TOP + TM_BELT_BOT) / 2;
+
+  // Belt frame sweeps in left-to-right
+  const int16_t span = TM_RIGHT - TM_LEFT;
+  const int16_t reveal =
+      detail < 120 ? (int16_t)((int32_t)span * detail / 120) : span;
+  if (reveal > 0) {
+    d.drawFastHLine(TM_LEFT, TM_BELT_TOP, reveal, SH110X_WHITE);
+    d.drawFastHLine(TM_LEFT, TM_BELT_BOT, reveal, SH110X_WHITE);
   }
-  if (detail >= 70) {
-    const int16_t hx = somaX + 4;
-    d.drawLine(somaX + 3, somaY - 1, hx, somaY, SH110X_WHITE);
-    d.drawLine(somaX + 3, somaY + 1, hx, somaY, SH110X_WHITE);
-    d.fillCircle(hx, somaY, 1, SH110X_WHITE);
+
+  // Rollers at both ends
+  if (detail >= 60) {
+    d.drawCircle(TM_LEFT, rollerCy, TM_ROLLER_R, SH110X_WHITE);
   }
-  if (detail >= 90) {
-    const uint8_t axonProgress =
-        detail < 220 ? (uint8_t)((detail - 90) * 255UL / 130) : 255;
-    drawMyelinatedAxon(d, somaX, somaY, axonProgress);
+  if (detail >= 120) {
+    d.drawCircle(TM_RIGHT, rollerCy, TM_ROLLER_R, SH110X_WHITE);
   }
+
+  // Belt dashes scrolling left (belt surface moves under the rodent)
+  if (detail >= 160) {
+    for (int16_t x = TM_LEFT + 3 + ((8 - beltPhase) & 7); x < TM_RIGHT - 3;
+         x += 8) {
+      d.drawFastVLine(x, TM_BELT_TOP + 2, 3, SH110X_WHITE);
+    }
+  }
+
+  // Rodent running in place, facing right
   if (detail >= 200) {
-    const int16_t tx = somaX + AXON_PT[AXON_PT_COUNT - 1][0];
-    const int16_t ty = somaY + AXON_PT[AXON_PT_COUNT - 1][1];
-    for (uint8_t i = 0; i < TERMINAL_PT_COUNT; i++) {
-      const int16_t bx = somaX + TERMINAL_PT[i][0];
-      const int16_t by = somaY + TERMINAL_PT[i][1];
-      d.drawLine(tx, ty, bx, by, SH110X_WHITE);
-      d.fillCircle(bx, by, 1, SH110X_WHITE);
-    }
-  }
-}
+    // Body + head + nose
+    d.fillRoundRect(56, 7, 16, 7, 3, SH110X_WHITE); // body y 7..13
+    d.fillCircle(73, 8, 3, SH110X_WHITE);           // head
+    d.drawPixel(77, 9, SH110X_WHITE);               // nose
+    d.drawCircle(72, 4, 1, SH110X_WHITE);           // ear
+    d.drawPixel(74, 7, SH110X_BLACK);               // eye
 
-static void drawAxonPulse(StepScreenDisplay &d, int16_t somaX, int16_t somaY,
-                          uint8_t travel) {
-  int16_t x, y;
-  axonPointAt(somaX, somaY, travel, x, y);
-  d.fillCircle(x, y, 2, SH110X_WHITE);
+    // Tail curving up and back to the left
+    d.drawLine(56, 10, 48, 6, SH110X_WHITE);
+    d.drawLine(48, 6, 42, 8, SH110X_WHITE);
+
+    // Four stick legs, two-phase gait (diagonal pairs swap)
+    const int16_t footY = TM_BELT_TOP - 1;
+    const int8_t offA = gait ? 2 : -1;
+    const int8_t offB = gait ? -1 : 2;
+    d.drawLine(58, 13, 58 + offA, footY, SH110X_WHITE); // rear left
+    d.drawLine(62, 13, 62 + offB, footY, SH110X_WHITE); // rear right
+    d.drawLine(66, 13, 66 + offA, footY, SH110X_WHITE); // front left
+    d.drawLine(70, 13, 70 + offB, footY, SH110X_WHITE); // front right
+  }
 }
 
 bool StepScreenSplash::play(StepScreenDisplay &display, const char *title,
@@ -176,7 +179,6 @@ bool StepScreenSplash::play(StepScreenDisplay &display,
       config.credit ? config.credit : "by the Neurotech Hub";
   const uint16_t totalMs = config.durationMs ? config.durationMs : 3200;
   const uint32_t startMs = millis();
-  const int16_t somaX = 22;
 
   while (true) {
     const uint32_t elapsed = millis() - startMs;
@@ -191,14 +193,34 @@ bool StepScreenSplash::play(StepScreenDisplay &display,
 
     display.clearDisplay();
 
-    uint8_t structure = elapsed < 700 ? (uint8_t)(elapsed * 255UL / 700) : 255;
-    drawNeuron(display, somaX, NEURON_CY, structure);
+    const uint8_t detail =
+        elapsed < 500 ? (uint8_t)(elapsed * 255UL / 500) : 255;
 
-    if (elapsed >= 550) {
-      const uint32_t pulseElapsed = elapsed - 550;
-      const uint8_t travel =
-          (uint8_t)((pulseElapsed % 380) * 255UL / 380);
-      drawAxonPulse(display, somaX, NEURON_CY, travel);
+    if (config.theme == STEPSCREEN_SPLASH_TREADMILL) {
+      // Belt scroll + gait start once the frame is complete
+      const uint8_t beltPhase =
+          elapsed >= 600 ? (uint8_t)((elapsed / 60) & 7) : 0;
+      const bool gait = elapsed >= 600 && ((elapsed / 120) & 1);
+      drawTreadmill(display, detail, beltPhase, gait);
+    } else {
+      // Plunger depression: ease-out over 500-1400 ms, then hold
+      int16_t plunger = 0;
+      if (elapsed >= 1400) {
+        plunger = PLUNGER_MAX;
+      } else if (elapsed > 500) {
+        const int32_t inv = 900 - (int32_t)(elapsed - 500);
+        plunger =
+            (int16_t)(PLUNGER_MAX - PLUNGER_MAX * inv * inv / (900L * 900L));
+      }
+
+      drawSyringe(display, detail, plunger);
+
+      // Droplets exit the needle while the plunger is being depressed
+      if (elapsed >= 900 && elapsed < 2400) {
+        const uint8_t phase =
+            (uint8_t)(((elapsed - 900) % 380) * 255UL / 380);
+        drawDrops(display, phase);
+      }
     }
 
     if (elapsed >= 700) {

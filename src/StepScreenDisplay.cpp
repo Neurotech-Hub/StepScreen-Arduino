@@ -73,8 +73,18 @@ void StepScreenDisplay::drawLayoutGuides() {
 
 void StepScreenDisplay::drawActionLabel(const char *label, int16_t y,
                                         bool active) {
-  const int16_t w = 6 * (int16_t)strlen(label); // 6px advance per char
-  const int16_t x = STEPSCREEN_W - w - 1;       // right-justified
+  // Cap at 4 chars so labels stay inside the 28px action column
+  // (6px/char at size 1). Longer strings are truncated, not wrapped.
+  char clipped[5];
+  uint8_t n = 0;
+  while (n < 4 && label[n] != '\0') {
+    clipped[n] = label[n];
+    n++;
+  }
+  clipped[n] = '\0';
+
+  const int16_t w = 6 * (int16_t)n;
+  const int16_t x = STEPSCREEN_W - w - 1; // right-justified
   const int16_t boxY = (y > 0) ? y - 1 : 0;
 
   // Clear this label's strip inside the action column so labels can be
@@ -90,6 +100,6 @@ void StepScreenDisplay::drawActionLabel(const char *label, int16_t y,
     setTextColor(SH110X_WHITE);
   }
   setCursor(x, y);
-  print(label);
+  print(clipped);
   setTextColor(SH110X_WHITE);
 }

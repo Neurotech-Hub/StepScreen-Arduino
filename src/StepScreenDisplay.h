@@ -21,7 +21,7 @@
 
 // Per-screen action column labels. nullptr means the button is not
 // available on this screen and is drawn as "----" (never highlighted).
-// Keep labels to 4 characters or fewer to fit the 28px action column.
+// Labels longer than 4 characters are truncated when drawn.
 struct StepScreenActionLabels {
   const char *back;
   const char *push;
