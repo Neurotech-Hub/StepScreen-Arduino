@@ -14,6 +14,7 @@
 enum StepScreenIOPage : uint8_t {
   STEPSCREEN_IO_PAGE_OUTPUTS = 0,
   STEPSCREEN_IO_PAGE_INPUTS = 1,
+  STEPSCREEN_IO_PAGE_SD = 2,
 };
 
 class StepScreenIODisplay {
@@ -28,6 +29,10 @@ public:
                         const StepScreenInputs &inputs,
                         StepScreenIOPage page, int8_t highlightOutput = -1,
                         const char *footer = nullptr);
+
+  // SD card status panel (IOTest SD page).
+  static void drawSdPanel(StepScreenDisplay &d, class StepScreenSD &sd,
+                          const char *footer = nullptr);
 };
 
 #endif // STEPSCREEN_IODISPLAY_H

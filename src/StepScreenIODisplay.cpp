@@ -1,5 +1,7 @@
 #include "StepScreenIODisplay.h"
 
+#include "StepScreenSD.h"
+
 #include <stdio.h>
 #include <string.h>
 
@@ -93,6 +95,48 @@ void StepScreenIODisplay::drawPanel(StepScreenDisplay &d, StepScreenIO &io,
     y += 8;
     snprintf(bufL, sizeof(bufL), "%.1f", inputs.vbatVolts);
     drawStatusLine(d, y, "VBAT", bufL);
+  }
+
+  if (footer != nullptr && y <= STEPSCREEN_CONTENT_Y + STEPSCREEN_CONTENT_H - 8) {
+    d.setTextColor(SH110X_WHITE);
+    d.setCursor(STEPSCREEN_CONTENT_X + 2, STEPSCREEN_CONTENT_Y +
+                                              STEPSCREEN_CONTENT_H - 8);
+    d.print(footer);
+  }
+}
+
+void StepScreenIODisplay::drawSdPanel(StepScreenDisplay &d, StepScreenSD &sd,
+                                      const char *footer) {
+  d.clearContentArea();
+  d.setTextSize(1);
+
+  int16_t y = STEPSCREEN_CONTENT_Y;
+  drawStatusLine(d, y, "Slot", sd.cardPresent() ? "IN" : "out");
+  y += 8;
+  drawStatusLine(d, y, "Mount", sd.mountStateLabel());
+  y += 8;
+
+  const char *testValue = "--";
+  if (!sd.cardPresent()) {
+    testValue = "--";
+  } else if (!sd.isReady()) {
+    testValue = "wait";
+  } else if (sd.lastSelfTestPassed()) {
+    testValue = "PASS";
+  } else if (sd.lastError()[0] != '\0') {
+    testValue = "fail";
+  } else {
+    testValue = "ready";
+  }
+  drawStatusLine(d, y, "Test", testValue);
+  y += 8;
+
+  if (sd.lastError()[0] != '\0' && y <= STEPSCREEN_CONTENT_Y + 40) {
+    char errLine[18];
+    strncpy(errLine, sd.lastError(), sizeof(errLine) - 1);
+    errLine[sizeof(errLine) - 1] = '\0';
+    drawStatusLine(d, y, "Err", errLine);
+    y += 8;
   }
 
   if (footer != nullptr && y <= STEPSCREEN_CONTENT_Y + STEPSCREEN_CONTENT_H - 8) {

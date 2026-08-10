@@ -118,7 +118,7 @@ void StepScreenIO::readInputs(StepScreenInputs &inputs,
                               StepScreenInput *screenInput) {
   inputs.beamDet = digitalRead(PIN_BEAM_DET) == HIGH;
   inputs.auxIn = digitalRead(PIN_AUX_IN) == HIGH;
-  inputs.sdCard = digitalRead(PIN_SD_CD) == HIGH;
+  inputs.sdCard = StepScreenSdCardInserted(PIN_SD_CD);
   inputs.vbatVolts = readVbatVolts();
 
   if (screenInput != nullptr) {

@@ -1,11 +1,14 @@
 /*
   StepScreen ToFTest
 
-  VL53L1X Time-of-Flight ranging on I2C (default 0x29) plus TMC2209
+  Adafruit VL53L4CD Time-of-Flight ranging on I2C (default 0x29) plus TMC2209
   motor control. Distance is printed over Serial and shown on the OLED.
 
   Hardware:
-    ToF   VL53L1X on Wire (SDA 20 / SCL 21), I2C address 0x29
+    ToF   Adafruit VL53L4CD on Wire (SDA 20 / SCL 21), I2C address 0x29
+          XSHUT optional -- set PIN_TOF_XSHUT if wired to the Feather
+    RTC   optional at 0x68 (shares the bus; not used by this sketch)
+    OLED  optional at 0x3C -- skipped automatically if not present
     Motor BIGTREETECH TMC2209 standalone step/dir (MotorTest pins):
             STEP -> D5  (PIN_MOTOR_STEP)
             DIR  -> D6  (PIN_MOTOR_DIR)
@@ -30,25 +33,28 @@
   ToF readings print continuously as  tof=123 mm  (including during CONT).
 
   Dependencies (Library Manager):
-    SparkFun VL53L1X, AccelStepper, Adafruit SH110X (+ GFX, BusIO)
+    stm32duino VL53L4CD, AccelStepper, Adafruit SH110X (+ GFX, BusIO)
 
   Board: Adafruit Feather M0 Adalogger (or compatible).
 */
 
-#include <SparkFun_VL53L1X.h>
 #include <StepScreen.h>
+#include <StepScreenBoard.h>
 #include <StepScreenStepper.h>
 #include <Wire.h>
 #include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
+#include <vl53l4cd_class.h>
 
-StepScreen screen;
-StepScreenStepper stepper;
-SFEVL53L1X tof;
+// Set to a GPIO if XSHUT is wired to the MCU; -1 if tied high on-module.
+#ifndef PIN_TOF_XSHUT
+#define PIN_TOF_XSHUT -1
+#endif
 
-#define TOF_I2C_ADDR 0x29
+#define TOF_I2C_ADDR_8BIT 0x52 // VL53L4CD default (7-bit 0x29)
 #define TOF_POLL_MS 100
+#define TOF_TIMING_BUDGET_MS 50
 #define TOF_OUT_OF_RANGE_MM 4000
 #define DRAW_INTERVAL_MS 150
 #define DRAW_INTERVAL_MOVING_MS 400
@@ -56,7 +62,12 @@ SFEVL53L1X tof;
 #define DEFAULT_SPEED_SPS 800.0f
 #define MAX_SPEED_SPS 2000.0f
 
-enum MotionMode : uint8_t {
+StepScreen screen;
+StepScreenStepper stepper;
+VL53L4CD tof(&Wire, PIN_TOF_XSHUT);
+
+enum MotionMode : uint8_t
+{
   MODE_IDLE,
   MODE_FIXED,
   MODE_CONTINUOUS,
@@ -77,29 +88,51 @@ uint32_t lastDrawMs = 0;
 char cmdBuf[MAX_CMD_LEN];
 uint8_t cmdIdx = 0;
 
-float clampSpeed(float sps) {
-  if (sps > MAX_SPEED_SPS) {
+static void i2cInit()
+{
+  Wire.begin();
+  Wire.setClock(100000);
+#if defined(WIRE_HAS_TIMEOUT) || defined(ARDUINO_ARCH_SAMD)
+  Wire.setTimeout(1000);
+#endif
+}
+
+static bool i2cProbe(uint8_t addr7)
+{
+  Wire.beginTransmission(addr7);
+  return Wire.endTransmission() == 0;
+}
+
+float clampSpeed(float sps)
+{
+  if (sps > MAX_SPEED_SPS)
+  {
     return MAX_SPEED_SPS;
   }
-  if (sps < -MAX_SPEED_SPS) {
+  if (sps < -MAX_SPEED_SPS)
+  {
     return -MAX_SPEED_SPS;
   }
   return sps;
 }
 
-void motionStop() {
+void motionStop()
+{
   stepper.stop();
   stepper.setSpeed(0.0f);
   motionMode = MODE_IDLE;
 }
 
-void startFixedMove(int32_t steps, float speedSps) {
-  if (steps == 0) {
+void startFixedMove(int32_t steps, float speedSps)
+{
+  if (steps == 0)
+  {
     return;
   }
 
   const float absSpeed = fabsf(clampSpeed(speedSps));
-  if (absSpeed <= 0.0f) {
+  if (absSpeed <= 0.0f)
+  {
     return;
   }
 
@@ -116,16 +149,21 @@ void startFixedMove(int32_t steps, float speedSps) {
   Serial.println(F(" sps"));
 }
 
-void startContinuous(float speedSps) {
+void startContinuous(float speedSps)
+{
   float sps = clampSpeed(speedSps);
-  if (sps == 0.0f) {
+  if (sps == 0.0f)
+  {
     Serial.println(F("CONT speed must be non-zero"));
     return;
   }
 
-  if (sps > 0.0f) {
+  if (sps > 0.0f)
+  {
     sps = directionForward ? sps : -sps;
-  } else {
+  }
+  else
+  {
     directionForward = false;
   }
 
@@ -141,62 +179,96 @@ void startContinuous(float speedSps) {
   Serial.println(F(" sps"));
 }
 
-void i2cScanBus() {
+void i2cScanBus()
+{
   Serial.print(F("I2C scan:"));
   uint8_t found = 0;
-  for (uint8_t addr = 1; addr < 127; addr++) {
+  for (uint8_t addr = 1; addr < 127; addr++)
+  {
     Wire.beginTransmission(addr);
-    if (Wire.endTransmission() == 0) {
+    if (Wire.endTransmission() == 0)
+    {
       Serial.print(F(" 0x"));
-      if (addr < 16) {
+      if (addr < 16)
+      {
         Serial.print('0');
       }
       Serial.print(addr, HEX);
       found++;
     }
   }
-  if (found == 0) {
+  if (found == 0)
+  {
     Serial.print(F(" (none)"));
   }
   Serial.println();
 }
 
-bool initTof() {
+bool initTof()
+{
+  i2cInit();
+  delay(100);
   i2cScanBus();
 
-  // SparkFun begin(): 0 = success (ST error code style)
-  if (tof.begin() != 0) {
-    Serial.println(F("ToFTest: VL53L1X begin failed at 0x29"));
+  Serial.println(F("ToF: starting VL53L4CD init..."));
+  tof.begin();
+  tof.VL53L4CD_Off();
+
+  const VL53L4CD_ERROR status = tof.InitSensor(TOF_I2C_ADDR_8BIT);
+  if (status != VL53L4CD_ERROR_NONE)
+  {
+    Serial.print(F("ToF: InitSensor failed status="));
+    Serial.println(status);
     return false;
   }
 
-  tof.setDistanceModeLong();
-  tof.setTimingBudgetInMs(50);
-  tof.setIntermeasurementPeriod(TOF_POLL_MS);
-  tof.startRanging();
+  uint16_t id = 0;
+  if (tof.VL53L4CD_GetSensorId(&id) == VL53L4CD_ERROR_NONE)
+  {
+    Serial.print(F("ToF: sensor ID 0x"));
+    Serial.println(id, HEX);
+  }
 
-  Serial.print(F("ToFTest: VL53L1X ready @ 0x"));
-  Serial.print(TOF_I2C_ADDR, HEX);
-  Serial.print(F(" id=0x"));
-  Serial.println(tof.getSensorID(), HEX);
+  if (tof.VL53L4CD_SetRangeTiming(TOF_TIMING_BUDGET_MS, TOF_POLL_MS) !=
+      VL53L4CD_ERROR_NONE)
+  {
+    Serial.println(F("ToF: SetRangeTiming failed"));
+    return false;
+  }
+
+  if (tof.VL53L4CD_StartRanging() != VL53L4CD_ERROR_NONE)
+  {
+    Serial.println(F("ToF: StartRanging failed"));
+    return false;
+  }
+
+  Serial.println(F("ToFTest: VL53L4CD ready @ 0x29"));
   return true;
 }
 
-void printTofLine() {
+void printTofLine()
+{
   Serial.print(F("tof="));
-  if (!tofOk) {
+  if (!tofOk)
+  {
     Serial.println(F("N/A"));
-  } else if (lastRangeValid) {
+  }
+  else if (lastRangeValid)
+  {
     Serial.print(lastRangeMm);
     Serial.println(F(" mm"));
-  } else {
+  }
+  else
+  {
     Serial.println(F("out of range"));
   }
 }
 
-void printStatus() {
+void printStatus()
+{
   Serial.print(F("mode="));
-  switch (motionMode) {
+  switch (motionMode)
+  {
   case MODE_IDLE:
     Serial.print(F("IDLE"));
     break;
@@ -217,159 +289,211 @@ void printStatus() {
   printTofLine();
 }
 
-void pollTof() {
-  if (!tofOk) {
+void pollTof()
+{
+  if (!tofOk)
+  {
     return;
   }
-  if (millis() - lastTofMs < TOF_POLL_MS) {
+  if (millis() - lastTofMs < TOF_POLL_MS)
+  {
     return;
   }
   lastTofMs = millis();
 
-  if (!tof.checkForDataReady()) {
+  uint8_t ready = 0;
+  if (tof.VL53L4CD_CheckForDataReady(&ready) != VL53L4CD_ERROR_NONE || !ready)
+  {
     return;
   }
 
-  const uint16_t mm = tof.getDistance();
-  const uint8_t status = tof.getRangeStatus();
-  tof.clearInterrupt();
+  tof.VL53L4CD_ClearInterrupt();
 
-  // 0 = no error. Status 2/4/7 etc. mean weak/no target.
-  if (status == 0 && mm > 0 && mm < TOF_OUT_OF_RANGE_MM) {
-    lastRangeMm = mm;
+  VL53L4CD_Result_t result;
+  if (tof.VL53L4CD_GetResult(&result) != VL53L4CD_ERROR_NONE)
+  {
+    return;
+  }
+
+  if (result.range_status == 0 && result.distance_mm > 0 &&
+      result.distance_mm < TOF_OUT_OF_RANGE_MM)
+  {
+    lastRangeMm = result.distance_mm;
     lastRangeValid = true;
-  } else {
+  }
+  else
+  {
     lastRangeValid = false;
   }
 
-  // Stream ToF continuously (including during CONT motor moves)
   printTofLine();
 }
 
-void processCommand() {
+void processCommand()
+{
   char *token = strtok(cmdBuf, " ");
-  if (token == nullptr) {
+  if (token == nullptr)
+  {
     return;
   }
-  for (char *p = token; *p; p++) {
+  for (char *p = token; *p; p++)
+  {
     *p = (char)toupper(*p);
   }
 
-  if (strcmp(token, "MOVE") == 0) {
+  if (strcmp(token, "MOVE") == 0)
+  {
     char *stepsStr = strtok(nullptr, " ");
-    if (!stepsStr) {
+    if (!stepsStr)
+    {
       Serial.println(F("MOVE <steps> [speed_sps]"));
       return;
     }
     const long steps = atol(stepsStr);
     char *speedStr = strtok(nullptr, " ");
     float speed = speedStr ? atof(speedStr) : defaultSpeedSps;
-    if (speed < 0.0f) {
+    if (speed < 0.0f)
+    {
       speed = -speed;
     }
-    if (speed == 0.0f) {
+    if (speed == 0.0f)
+    {
       speed = defaultSpeedSps;
     }
     startFixedMove((int32_t)steps, speed);
-
-  } else if (strcmp(token, "CONT") == 0) {
+  }
+  else if (strcmp(token, "CONT") == 0)
+  {
     char *speedStr = strtok(nullptr, " ");
-    if (!speedStr) {
+    if (!speedStr)
+    {
       Serial.println(F("CONT <speed_sps>"));
       return;
     }
     startContinuous(atof(speedStr));
-
-  } else if (strcmp(token, "DIR") == 0) {
+  }
+  else if (strcmp(token, "DIR") == 0)
+  {
     char *dirStr = strtok(nullptr, " ");
-    if (!dirStr) {
+    if (!dirStr)
+    {
       Serial.println(F("DIR F|R"));
       return;
     }
-    for (char *p = dirStr; *p; p++) {
+    for (char *p = dirStr; *p; p++)
+    {
       *p = (char)toupper(*p);
     }
-    if (dirStr[0] == 'F') {
+    if (dirStr[0] == 'F')
+    {
       directionForward = true;
-    } else if (dirStr[0] == 'R' || dirStr[0] == 'B') {
+    }
+    else if (dirStr[0] == 'R' || dirStr[0] == 'B')
+    {
       directionForward = false;
-    } else {
+    }
+    else
+    {
       Serial.println(F("DIR F|R"));
       return;
     }
-    if (motionMode == MODE_CONTINUOUS) {
+    if (motionMode == MODE_CONTINUOUS)
+    {
       const float absSpeed = fabsf(stepper.speed());
       stepper.setSpeed(directionForward ? absSpeed : -absSpeed);
     }
     Serial.print(F("DIR "));
     Serial.println(directionForward ? F("FWD") : F("REV"));
-
-  } else if (strcmp(token, "FWD") == 0) {
+  }
+  else if (strcmp(token, "FWD") == 0)
+  {
     directionForward = true;
-    if (motionMode == MODE_CONTINUOUS) {
+    if (motionMode == MODE_CONTINUOUS)
+    {
       stepper.setSpeed(fabsf(stepper.speed()));
     }
     Serial.println(F("DIR FWD"));
-
-  } else if (strcmp(token, "REV") == 0) {
+  }
+  else if (strcmp(token, "REV") == 0)
+  {
     directionForward = false;
-    if (motionMode == MODE_CONTINUOUS) {
+    if (motionMode == MODE_CONTINUOUS)
+    {
       stepper.setSpeed(-fabsf(stepper.speed()));
     }
     Serial.println(F("DIR REV"));
-
-  } else if (strcmp(token, "SPEED") == 0) {
+  }
+  else if (strcmp(token, "SPEED") == 0)
+  {
     char *speedStr = strtok(nullptr, " ");
-    if (!speedStr) {
+    if (!speedStr)
+    {
       Serial.println(F("SPEED <sps>"));
       return;
     }
     defaultSpeedSps = fabsf(clampSpeed(atof(speedStr)));
-    if (defaultSpeedSps <= 0.0f) {
+    if (defaultSpeedSps <= 0.0f)
+    {
       defaultSpeedSps = DEFAULT_SPEED_SPS;
     }
     stepper.setMaxSpeed(defaultSpeedSps);
-    if (motionMode == MODE_CONTINUOUS) {
+    if (motionMode == MODE_CONTINUOUS)
+    {
       stepper.setSpeed(directionForward ? defaultSpeedSps : -defaultSpeedSps);
     }
     Serial.print(F("SPEED "));
     Serial.println(defaultSpeedSps, 1);
-
-  } else if (strcmp(token, "STOP") == 0) {
+  }
+  else if (strcmp(token, "STOP") == 0)
+  {
     motionStop();
     Serial.println(F("STOP"));
-
-  } else if (strcmp(token, "TOF") == 0 || strcmp(token, "RANGE") == 0) {
+  }
+  else if (strcmp(token, "TOF") == 0 || strcmp(token, "RANGE") == 0)
+  {
     printTofLine();
-
-  } else if (strcmp(token, "SCAN") == 0) {
+  }
+  else if (strcmp(token, "SCAN") == 0)
+  {
+    i2cInit();
+    delay(50);
     i2cScanBus();
-
-  } else if (strcmp(token, "INIT") == 0) {
-    if (tofOk) {
-      tof.stopRanging();
+  }
+  else if (strcmp(token, "INIT") == 0)
+  {
+    if (tofOk)
+    {
+      tof.VL53L4CD_StopRanging();
     }
     tofOk = initTof();
     Serial.println(tofOk ? F("INIT done") : F("INIT failed"));
-
-  } else if (strcmp(token, "STATUS") == 0) {
+  }
+  else if (strcmp(token, "STATUS") == 0)
+  {
     printStatus();
-
-  } else if (strcmp(token, "RESET") == 0) {
+  }
+  else if (strcmp(token, "RESET") == 0)
+  {
     char *sub = strtok(nullptr, " ");
-    if (sub) {
-      for (char *p = sub; *p; p++) {
+    if (sub)
+    {
+      for (char *p = sub; *p; p++)
+      {
         *p = (char)toupper(*p);
       }
     }
-    if (sub && strcmp(sub, "POS") == 0) {
+    if (sub && strcmp(sub, "POS") == 0)
+    {
       stepper.resetPosition();
       Serial.println(F("RESET POS"));
-    } else {
+    }
+    else
+    {
       Serial.println(F("RESET POS"));
     }
-
-  } else if (strcmp(token, "HELP") == 0) {
+  }
+  else if (strcmp(token, "HELP") == 0)
+  {
     Serial.println(F("Commands:"));
     Serial.println(F("  MOVE <steps> [speed_sps]"));
     Serial.println(F("  CONT <speed_sps>"));
@@ -377,55 +501,75 @@ void processCommand() {
     Serial.println(F("  SPEED <sps>"));
     Serial.println(F("  STOP"));
     Serial.println(F("  TOF | SCAN | INIT | STATUS | RESET POS"));
-  } else {
+  }
+  else
+  {
     Serial.println(F("Unknown command (HELP)"));
   }
 }
 
-void serialCmdUpdate() {
-  while (Serial.available() > 0) {
+void serialCmdUpdate()
+{
+  while (Serial.available() > 0)
+  {
     const char c = (char)Serial.read();
-    if (c == '\n' || c == '\r') {
-      if (cmdIdx > 0) {
+    if (c == '\n' || c == '\r')
+    {
+      if (cmdIdx > 0)
+      {
         cmdBuf[cmdIdx] = '\0';
         processCommand();
         cmdIdx = 0;
       }
-    } else if (cmdIdx < MAX_CMD_LEN - 1) {
+    }
+    else if (cmdIdx < MAX_CMD_LEN - 1)
+    {
       cmdBuf[cmdIdx++] = c;
     }
   }
 }
 
-void drawUi() {
-  if (!displayOk) {
+void drawUi()
+{
+  if (!displayOk)
+  {
     return;
   }
 
   StepScreenDisplay &d = screen.display();
   d.clearDisplay();
-  d.drawInfoBar("VL53L1X");
+  d.drawInfoBar("VL53L4CD");
   d.drawActionColumn(false, false, false);
 
   d.setTextSize(1);
   d.setCursor(STEPSCREEN_CONTENT_X, STEPSCREEN_CONTENT_Y);
   d.print(F("Range "));
-  if (!tofOk) {
+  if (!tofOk)
+  {
     d.println(F("--"));
-  } else if (lastRangeValid) {
+  }
+  else if (lastRangeValid)
+  {
     d.print(lastRangeMm);
     d.println(F(" mm"));
-  } else {
+  }
+  else
+  {
     d.println(F("OOR"));
   }
 
   d.setCursor(STEPSCREEN_CONTENT_X, STEPSCREEN_CONTENT_Y + 12);
   d.print(F("Motor "));
-  if (motionMode == MODE_CONTINUOUS) {
+  if (motionMode == MODE_CONTINUOUS)
+  {
     d.print(F("CONT "));
-  } else if (motionMode == MODE_FIXED) {
+  }
+  else if (motionMode == MODE_FIXED)
+  {
     d.print(F("MOVE "));
-  } else {
+  }
+  else
+  {
     d.print(F("IDLE "));
   }
   d.println(directionForward ? F("FWD") : F("REV"));
@@ -442,27 +586,37 @@ void drawUi() {
   d.display();
 }
 
-void setup() {
+void setup()
+{
   Serial.begin(115200);
-  delay(1500);
-
-  Wire.begin();
-  Wire.setClock(100000);
-  delay(50);
+  delay(2000);
+  Serial.println(F("Serial ready."));
 
   tofOk = initTof();
-
-  displayOk = screen.begin();
-  if (!displayOk) {
-    Serial.println(F("ToFTest: OLED not found at 0x3C"));
+  if (!tofOk)
+  {
+    Serial.println(F("ToFTest: VL53L4CD init failed (motor still available)"));
   }
-  Wire.setClock(100000);
+
+  if (i2cProbe(STEPSCREEN_I2C_ADDR))
+  {
+    displayOk = screen.display().begin(STEPSCREEN_I2C_ADDR);
+    if (!displayOk)
+    {
+      Serial.println(F("ToFTest: OLED at 0x3C did not initialize"));
+    }
+  }
+  else
+  {
+    Serial.println(F("ToFTest: OLED not present, skipping display"));
+    displayOk = false;
+  }
 
   stepper.begin();
   stepper.setMaxSpeed(defaultSpeedSps);
-  stepper.enable(); // always-on driver
+  stepper.enable();
 
-  Serial.println(F("StepScreen ToFTest (VL53L1X)"));
+  Serial.println(F("StepScreen ToFTest (VL53L4CD)"));
   Serial.print(F("  STEP pin "));
   Serial.println(PIN_MOTOR_STEP);
   Serial.print(F("  DIR  pin "));
@@ -472,21 +626,33 @@ void setup() {
   Serial.print(F("  microsteps/rev "));
   Serial.println(STEPSCREEN_MOTOR_STEPS_PER_REV);
   Serial.println(F("Ready. Type HELP for commands."));
-  Serial.println(F("ToF streams continuously (tof=... mm)."));
+  if (tofOk)
+  {
+    Serial.println(F("ToF streams continuously (tof=... mm)."));
+  }
+  else
+  {
+    Serial.println(F("ToF offline. Type INIT to retry."));
+  }
 
   lastDrawMs = millis();
   drawUi();
 }
 
-void loop() {
+void loop()
+{
   serialCmdUpdate();
   pollTof();
 
-  if (motionMode == MODE_CONTINUOUS) {
+  if (motionMode == MODE_CONTINUOUS)
+  {
     stepper.runSpeed();
-  } else if (motionMode == MODE_FIXED) {
+  }
+  else if (motionMode == MODE_FIXED)
+  {
     stepper.run();
-    if (!stepper.isRunning()) {
+    if (!stepper.isRunning())
+    {
       motionMode = MODE_IDLE;
       Serial.print(F("DONE  pos="));
       Serial.println(stepper.currentPosition());
@@ -495,7 +661,8 @@ void loop() {
 
   const uint32_t drawInterval =
       (motionMode != MODE_IDLE) ? DRAW_INTERVAL_MOVING_MS : DRAW_INTERVAL_MS;
-  if (millis() - lastDrawMs >= drawInterval) {
+  if (millis() - lastDrawMs >= drawInterval)
+  {
     lastDrawMs = millis();
     drawUi();
   }

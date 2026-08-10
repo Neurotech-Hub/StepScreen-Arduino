@@ -20,8 +20,19 @@
 #endif
 
 #ifndef PIN_SD_CD
-#define PIN_SD_CD 7 // microSD card detect (HIGH = card inserted)
+#define PIN_SD_CD 7 // microSD card detect (mechanical switch)
 #endif
+
+// CD pin level when a card is seated in the slot (INPUT_PULLUP on PIN_SD_CD).
+// StepScreen board: LOW when inserted. Stock Adafruit Adalogger: HIGH — override
+// in the sketch with #define STEPSCREEN_SD_CD_INSERTED HIGH if needed.
+#ifndef STEPSCREEN_SD_CD_INSERTED
+#define STEPSCREEN_SD_CD_INSERTED LOW
+#endif
+
+static inline bool StepScreenSdCardInserted(uint8_t cdPin = PIN_SD_CD) {
+  return digitalRead(cdPin) == STEPSCREEN_SD_CD_INSERTED;
+}
 
 #ifndef PIN_LED_GREEN
 #define PIN_LED_GREEN 8 // green LED next to the SD slot (Adalogger)

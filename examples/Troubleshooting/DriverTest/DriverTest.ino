@@ -10,12 +10,16 @@
   Manager. Not a StepScreen library dependency; only needed for this test
   / future driver work.
 
-  Wiring (dedicated RX/TX on the StepScreen TMC2209 carrier):
-    SAMD21 D1 (TX, Serial1) ------------------------ TMC2209 RX
-    SAMD21 D0 (RX, Serial1) ------------------------ TMC2209 TX
+  Wiring (half-duplex single-wire UART on the StepScreen TMC2209 carrier):
+    SAMD21 D1 (TX, Serial1) --[1kΩ]--+
+    SAMD21 D0 (RX, Serial1) ---------+--- TMC2209 RX pad (PDN_UART on chip)
     SAMD21 GND               ------------------------ TMC2209 GND
+    TMC2209 TX pad is NC on this board -- leave unconnected.
     TMC2209 VIO must be 3.3V (do not feed 5V logic)
     TMC2209 VM (motor supply) must be ON -- UART will not respond without it.
+
+  The 1kΩ sits in the TX leg only; RX joins the same node directly. This
+  matches the TMC2209 single-wire UART: one bus to PDN_UART, not crossed TX/RX.
 
   MS1 + MS2 tied HIGH on this board -> UART node address 0b11 (3).
   In UART mode those pins stop selecting microsteps and only set the
@@ -136,6 +140,7 @@ void setup()
 
   Serial.println(F("StepScreen DriverTest"));
   Serial.println(F("Bring-up test for TMC2209 UART -- run before any motor test."));
+  Serial.println(F("UART: D1--[1k]--+--TMC RX(PDN); D0--+ ; TMC TX = NC"));
   Serial.println();
 
   Serial1.begin(115200);
@@ -155,11 +160,13 @@ void setup()
     Serial.println();
     Serial.println(F("FAIL: expected 0x21. UART is not communicating."));
     Serial.println(F("Check in order:"));
-    Serial.println(F("  1. TX/RX crossed: D1(TX)->TMC RX, D0(RX)<-TMC TX"));
-    Serial.println(F("  2. GND common between Feather and driver"));
-    Serial.println(F("  3. VIO = 3.3V, not 5V"));
-    Serial.println(F("  4. VM (motor supply) is ON"));
-    Serial.println(F("  5. DRIVER_ADDRESS matches MS1/MS2 strapping (0b11 here)"));
+    Serial.println(F("  1. D1(TX)--[1k]--+--TMC RX(PDN_UART); D0(RX)--+ (same node)"));
+    Serial.println(F("  2. TMC TX pad left NC (not wired to Feather)"));
+    Serial.println(F("  3. 1kΩ is in the TX leg, not between TX and RX directly"));
+    Serial.println(F("  4. GND common between Feather and driver"));
+    Serial.println(F("  5. VIO = 3.3V, not 5V"));
+    Serial.println(F("  6. VM (motor supply) is ON"));
+    Serial.println(F("  7. DRIVER_ADDRESS matches MS1/MS2 strapping (0b11 here)"));
     return;
   }
 
@@ -167,7 +174,7 @@ void setup()
   Serial.println();
 
   // --- UART microstep control ---
-  driver.pdn_disable(true);      // PDN_UART pin = UART, not power-down
+  driver.pdn_disable(true);      // GCONF: keep PDN_UART in UART mode (register bit)
   driver.mstep_reg_select(true); // microsteps come from MRES, not MS1/MS2
   driver.I_scale_analog(false);  // current fully software-controlled
   driver.toff(5);                // chopper on

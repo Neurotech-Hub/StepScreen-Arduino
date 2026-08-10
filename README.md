@@ -56,7 +56,7 @@ Board I/O (from `StepScreenBoard.h`):
 | Symbol | Default pin | Notes |
 |---|---|---|
 | `PIN_SD_CS` | 4 | microSD chip select |
-| `PIN_SD_CD` | 7 | card detect (HIGH = inserted) |
+| `PIN_SD_CD` | 7 | card detect (`STEPSCREEN_SD_CD_INSERTED`, default LOW) |
 | `PIN_LED_GREEN` | 8 | Adalogger green LED (SD area) |
 | `PIN_LED_RED` / `PIN_USER_LED1` | 13 | Adalogger red LED; same pin on this board |
 | `PIN_USER_LED2` | A1 | user indicator LED |
@@ -66,7 +66,7 @@ Board I/O (from `StepScreenBoard.h`):
 | `PIN_VBAT` | A7 (pin 9) | battery voltage divider (reads VBAT/2) |
 | `PIN_I2C_SDA` / `PIN_I2C_SCL` | 20 / 21 | Wire |
 
-Optional helpers: `#include <StepScreenIO.h>` for output registry and input sampling; `#include <StepScreenIODisplay.h>` to render I/O status on the OLED. See the **IOTest** example.
+Optional helpers: `#include <StepScreenIO.h>` for output registry and input sampling; `#include <StepScreenIODisplay.h>` to render I/O status on the OLED; `#include <StepScreenSD.h>` for microSD mount/read/write with card-detect hot-plug. See the **IOTest** example.
 
 TMC2209 stepper (standalone step/dir, from `StepScreenBoard.h`):
 
@@ -77,6 +77,26 @@ TMC2209 stepper (standalone step/dir, from `StepScreenBoard.h`):
 | `PIN_MOTOR_EN` | 9 | ~EN, active LOW (LOW = enabled) |
 
 MS1 and MS2 are tied HIGH on the module (1/16 microstepping). CLK is tied GND (internal clock). UART/DIAG are not used. `STEPSCREEN_MOTOR_STEPS_PER_REV` defaults to 3200 (200 full steps × 16 microsteps).
+
+### microSD (`StepScreenSD`)
+
+The Adalogger exposes SPI chip select on pin 4 and a mechanical card-detect switch on pin 7. On the StepScreen board the CD pin reads **LOW** when a card is inserted (`INPUT_PULLUP`). Stock [Adalogger pinouts](https://learn.adafruit.com/adafruit-feather-m0-adalogger/pinouts) use the opposite polarity — add `#define STEPSCREEN_SD_CD_INSERTED HIGH` before `#include <StepScreenSD.h>` if needed.
+
+```cpp
+#include <StepScreenSD.h>
+
+StepScreenSD sd;
+sd.begin();          // optional cs/cd pins; defaults PIN_SD_CS / PIN_SD_CD
+
+void loop() {
+  sd.update();       // required for hot-plug
+  if (sd.isReady()) {
+    sd.appendLine("/log.txt", "sample");
+  }
+}
+```
+
+See **IOTest** for automatic output walk, live dashboard, and SD self-test on mount.
 
 All buttons are read active LOW with internal pullups; no external resistors are needed. Swap `PIN_ENC_A`/`PIN_ENC_B` to flip the encoder's rotation sign.
 
@@ -257,7 +277,7 @@ Call `pollNavEvents()` exactly once per loop — it consumes the underlying edge
 - **ScreenTest** -- display validation followed by an interactive control check (encoder + all three buttons). Run this first on new hardware.
 - **BasicUI** -- interactive demo: the encoder drives a counter, and each button highlights its action-column label. Includes the encoder ISR block.
 - **MotorTest** -- TMC2209 step/dir exercise without a motor connected. Blocking and non-blocking moves with Serial reporting; green LED blinks on each STEP pulse.
-- **IOTest** -- auto-walks each board output (solo on/off) while displaying live inputs on the OLED. Encoder/buttons switch pages, toggle outputs, or force all on/off.
+- **IOTest** -- auto-walks each board output solo while a single dashboard shows inputs, encoder, VBAT, and SD status. SD self-test runs automatically when a card mounts.
 - **SyringePump** -- three-screen pump controller built on `StepScreenNav` + `StepScreenStepper`. Home (motor off), Adjust (encoder jogs the motor; OK cycles Low/Med/Fast speed), Run (send a signed step count over Serial at 115200, e.g. `3200` + newline). Demonstrates the menu debounce pattern.
 - **Treadmill** -- rodent treadmill controller. Home shows speed (cm/s) and timeout (minutes) with the edited metric inverted (Back toggles Spd/Time, Sel toggles Fwd/Rev, encoder adjusts). Run ramps the belt to speed via `setSpeed()`/`runSpeed()`, counts down, then disables the motor and blinks DONE. Speed→steps mapping is a placeholder (`STEPSCREEN_TREADMILL_SPS_PER_CMS`).
 

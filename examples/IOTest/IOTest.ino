@@ -1,44 +1,128 @@
 /*
   StepScreen IOTest
 
-  Exercises all board outputs and displays live input states on the OLED.
+  Automatic board bring-up test — no menu navigation required.
 
-  Modes (encoder push / Sel toggles page; footer shows controls):
-    OUT page — auto-walks outputs one-at-a-time (1.5 s each), then repeats.
-               Encoder: select output manually. Confirm/OK: toggle selected.
-               Back: all off.  (Auto-walk pauses until all-off, then resumes.)
-    IN page  — live digital/analog inputs + encoder count.
+  On boot:
+    - Walks each output solo for 1.5 s (LED1, LED2, EXT, GRN, MEN, MDIR, STEP…)
+    - Shows live inputs on one dashboard (beam, aux, buttons, encoder, VBAT, SD)
+    - Mounts SD when inserted; runs a write/read self-test once per mount
 
-  Outputs under test (StepScreenIO registry):
-    LED1, LED2, EXT, GRN, [RED], MEN (~EN), MDIR, STEP (pulses when active)
+  Watch the hardware and Serial (115200). Re-insert an SD card to re-test hot-plug.
 
   Board: Adafruit Feather M0 Adalogger (or compatible).
 */
 
 #include <StepScreen.h>
 #include <StepScreenIO.h>
-#include <StepScreenIODisplay.h>
+#include <StepScreenSD.h>
+
+#include <stdio.h>
 
 StepScreen screen;
 StepScreenIO io;
-
-enum RunMode : uint8_t {
-  MODE_AUTO_WALK,
-  MODE_MANUAL,
-};
-
-RunMode runMode = MODE_AUTO_WALK;
-StepScreenIOPage page = STEPSCREEN_IO_PAGE_OUTPUTS;
+StepScreenSD sd;
 
 uint8_t soloIndex = 0;
-int8_t selectedOutput = 0;
 uint32_t lastWalkMs = 0;
+uint32_t lastDrawMs = 0;
+int32_t lastDrawnEncoder = 0;
+bool lastCardPresent = false;
+StepScreenSDMountState lastMountState = STEPSCREEN_SD_ABSENT;
+bool sdTestedThisMount = false;
 
 const uint32_t WALK_INTERVAL_MS = 1500;
+const uint32_t DRAW_INTERVAL_MS = 250;
 
-void applyAndReport(const char *action) {
+void logSdEvents() {
+  if (sd.cardPresent() != lastCardPresent) {
+    lastCardPresent = sd.cardPresent();
+    sdTestedThisMount = false;
+    Serial.print(F("SD card "));
+    Serial.println(lastCardPresent ? F("inserted") : F("removed"));
+  }
+
+  if (sd.mountState() != lastMountState) {
+    lastMountState = sd.mountState();
+    Serial.print(F("SD mount: "));
+    Serial.println(sd.mountStateLabel());
+  }
+}
+
+void trySdSelfTest() {
+  if (!sd.isReady() || sdTestedThisMount) {
+    return;
+  }
+
+  Serial.println(F("SD self-test..."));
+  if (sd.runSelfTest()) {
+    Serial.println(F("SD self-test PASS"));
+  } else {
+    Serial.print(F("SD self-test FAIL: "));
+    Serial.println(sd.lastError());
+  }
+  sdTestedThisMount = true;
+}
+
+void advanceOutputWalk() {
+  soloIndex = (soloIndex + 1) % io.outputCount();
+  io.soloOutput(soloIndex);
   io.apply();
-  Serial.println(action);
+  Serial.print(F("Output: "));
+  Serial.println(io.outputLabel(soloIndex));
+  lastWalkMs = millis();
+  lastDrawMs = 0; // refresh OLED immediately
+}
+
+void drawDashboard(const StepScreenInputs &inputs) {
+  StepScreenDisplay &d = screen.display();
+  char buf[16];
+
+  d.clearDisplay();
+  d.drawInfoBar("IOTest");
+
+  d.setTextSize(1);
+  int16_t y = STEPSCREEN_CONTENT_Y;
+
+  d.setCursor(STEPSCREEN_CONTENT_X + 2, y);
+  d.print(F("Out "));
+  d.println(io.outputLabel(soloIndex));
+  y += 8;
+
+  d.setCursor(STEPSCREEN_CONTENT_X + 2, y);
+  d.print(F("Beam "));
+  d.print(inputs.beamDet ? F("HI") : F("LO"));
+  d.print(F("  Aux "));
+  d.println(inputs.auxIn ? F("HI") : F("LO"));
+  y += 8;
+
+  d.setCursor(STEPSCREEN_CONTENT_X + 2, y);
+  d.print(F("SD "));
+  if (!sd.cardPresent()) {
+    d.print(F("out"));
+  } else {
+    d.print(sd.mountStateLabel());
+    if (sd.lastSelfTestPassed()) {
+      d.print(F(" OK"));
+    }
+  }
+  d.println();
+  y += 8;
+
+  d.setCursor(STEPSCREEN_CONTENT_X + 2, y);
+  snprintf(buf, sizeof(buf), "Enc %ld", (long)inputs.encoder);
+  d.print(buf);
+  snprintf(buf, sizeof(buf), "  V %.1f", inputs.vbatVolts);
+  d.println(buf);
+  y += 8;
+
+  d.setCursor(STEPSCREEN_CONTENT_X + 2, y);
+  d.print(inputs.btnBack ? F("B") : F("-"));
+  d.print(inputs.btnPush ? F("S") : F("-"));
+  d.print(inputs.btnConfirm ? F("K") : F("-"));
+  d.println(F("  auto walk"));
+
+  d.display();
 }
 
 void setup() {
@@ -53,107 +137,46 @@ void setup() {
   }
 
   io.begin();
+  sd.begin();
 
-  // --- STEPSCREEN ENCODER ISR SETUP (copy into setup()) ---
   STEPSCREEN_ATTACH_ENCODER_ISRS();
-  // --- END STEPSCREEN ENCODER ISR SETUP ---
 
-  runMode = MODE_AUTO_WALK;
   soloIndex = io.soloOutput(0);
   io.apply();
   lastWalkMs = millis();
+  lastDrawMs = millis();
 
-  Serial.println(F("IOTest started — auto-walking outputs"));
+  lastCardPresent = sd.cardPresent();
+  lastMountState = sd.mountState();
+
+  Serial.println(F("IOTest — auto output walk + live dashboard"));
+  Serial.print(F("Output: "));
+  Serial.println(io.outputLabel(soloIndex));
 }
 
 void loop() {
+  sd.update();
+  logSdEvents();
+  trySdSelfTest();
+
+  if (millis() - lastWalkMs >= WALK_INTERVAL_MS) {
+    advanceOutputWalk();
+  }
+
+  io.serviceStepOutput();
+
   StepScreenInput &in = screen.input();
+  in.pollButtons(); // keep debounce state fresh for dashboard
+
   StepScreenInputs inputs;
   io.readInputs(inputs, &in);
 
-  // --- Output walk / manual control ---
-  if (page == STEPSCREEN_IO_PAGE_OUTPUTS) {
-    if (runMode == MODE_AUTO_WALK) {
-      if (millis() - lastWalkMs >= WALK_INTERVAL_MS) {
-        soloIndex = (soloIndex + 1) % io.outputCount();
-        io.soloOutput(soloIndex);
-        io.apply();
-        Serial.print(F("Auto solo: "));
-        Serial.println(io.outputLabel(soloIndex));
-        lastWalkMs = millis();
-      }
-    }
+  const bool needsDraw = (millis() - lastDrawMs >= DRAW_INTERVAL_MS) ||
+                         (inputs.encoder != lastDrawnEncoder);
 
-    int32_t encDelta = in.getEncoderDelta();
-    if (encDelta != 0) {
-      runMode = MODE_MANUAL;
-      selectedOutput =
-          (selectedOutput + encDelta) % (int8_t)io.outputCount();
-      if (selectedOutput < 0) {
-        selectedOutput += io.outputCount();
-      }
-    }
-
-    uint8_t events = in.pollButtons();
-    if (events & STEPSCREEN_EVT_BACK) {
-      io.setAllOutputs(false);
-      io.apply();
-      runMode = MODE_MANUAL;
-      Serial.println(F("All outputs OFF"));
-    }
-    if (events & STEPSCREEN_EVT_CONFIRM) {
-      runMode = MODE_MANUAL;
-      io.setOutput((uint8_t)selectedOutput,
-                   !io.getOutput((uint8_t)selectedOutput));
-      io.apply();
-      Serial.print(F("Toggle "));
-      Serial.println(io.outputLabel((uint8_t)selectedOutput));
-    }
-    if (events & STEPSCREEN_EVT_PUSH) {
-      page = (page == STEPSCREEN_IO_PAGE_OUTPUTS)
-                 ? STEPSCREEN_IO_PAGE_INPUTS
-                 : STEPSCREEN_IO_PAGE_OUTPUTS;
-    }
-
-    io.serviceStepOutput();
-  } else {
-    uint8_t events = in.pollButtons();
-    if (events & STEPSCREEN_EVT_PUSH) {
-      page = STEPSCREEN_IO_PAGE_OUTPUTS;
-      runMode = MODE_AUTO_WALK;
-      lastWalkMs = millis();
-    }
-    if (events & STEPSCREEN_EVT_BACK) {
-      io.setAllOutputs(true);
-      io.apply();
-      Serial.println(F("All outputs ON"));
-    }
-    if (events & STEPSCREEN_EVT_CONFIRM) {
-      io.setAllOutputs(false);
-      io.apply();
-      Serial.println(F("All outputs OFF"));
-    }
+  if (needsDraw) {
+    lastDrawMs = millis();
+    lastDrawnEncoder = inputs.encoder;
+    drawDashboard(inputs);
   }
-
-  // --- Display ---
-  StepScreenDisplay &d = screen.display();
-  d.clearDisplay();
-
-  const char *title = (page == STEPSCREEN_IO_PAGE_OUTPUTS) ? "IO Out" : "IO In";
-  d.drawInfoBar(title, in.readBack());
-  d.drawActionColumn(in.readBack(), in.readPush(), in.readConfirm());
-
-  int8_t highlight = -1;
-  const char *footer = nullptr;
-  if (page == STEPSCREEN_IO_PAGE_OUTPUTS) {
-    highlight = (runMode == MODE_MANUAL) ? selectedOutput : (int8_t)soloIndex;
-    footer = (runMode == MODE_AUTO_WALK) ? "Sel:inputs" : "Enc:sel OK:tog";
-  } else {
-    footer = "Sel:outputs";
-  }
-
-  StepScreenIODisplay::drawPanel(d, io, inputs, page, highlight, footer);
-  d.display();
-
-  delay(16);
 }
