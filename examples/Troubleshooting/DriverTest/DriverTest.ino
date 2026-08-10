@@ -10,11 +10,12 @@
   Manager. Not a StepScreen library dependency; only needed for this test
   / future driver work.
 
-  Wiring (half-duplex single-wire UART, resistor on the TX leg only):
-    SAMD21 D1 (TX, Serial1) --[1k]-- TMC2209 TX pad --- PDN_UART
-    SAMD21 D0 (RX, Serial1) ------------------------ TMC2209 RX pad --- PDN_UART
+  Wiring (dedicated RX/TX on the StepScreen TMC2209 carrier):
+    SAMD21 D1 (TX, Serial1) ------------------------ TMC2209 RX
+    SAMD21 D0 (RX, Serial1) ------------------------ TMC2209 TX
     SAMD21 GND               ------------------------ TMC2209 GND
     TMC2209 VIO must be 3.3V (do not feed 5V logic)
+    TMC2209 VM (motor supply) must be ON -- UART will not respond without it.
 
   MS1 + MS2 tied HIGH on this board -> UART node address 0b11 (3).
   In UART mode those pins stop selecting microsteps and only set the
@@ -26,7 +27,7 @@
        version() must read 0x21 -- anything else means wiring/address/
        baud is wrong and the rest of the test is skipped.
     2. Enable UART microstep control (pdn_disable, mstep_reg_select),
-       set a known microstep value, read it back.
+       write/read several microstep values to confirm register access.
     3. Enable the driver and issue a short blocking move via
        StepScreenMotor so the configured microstep count is visibly
        one motor movement, not just a register readback.
@@ -46,22 +47,30 @@
 // common reason version() reads back 0x00 or 0xFF.
 #define DRIVER_ADDRESS 0b11
 
-#define TEST_MICROSTEPS 64
 #define TEST_RUN_CURRENT_MA 600
+
+// Valid TMC2209 MRES values exercised in the write/read sweep.
+const uint16_t TEST_MICROSTEP_VALUES[] = {16, 32, 64, 128, 256};
+const uint8_t TEST_MICROSTEP_COUNT =
+    sizeof(TEST_MICROSTEP_VALUES) / sizeof(TEST_MICROSTEP_VALUES[0]);
+#define MOVE_MICROSTEPS 64
 
 TMC2209Stepper driver(&Serial1, R_SENSE, DRIVER_ADDRESS);
 StepScreenMotor motor;
 
 bool driverOk = false;
 
-void printHex8(uint8_t v) {
-  if (v < 0x10) {
+void printHex8(uint8_t v)
+{
+  if (v < 0x10)
+  {
     Serial.print('0');
   }
   Serial.println(v, HEX);
 }
 
-void reportIOIN() {
+void reportIOIN()
+{
   Serial.println(F("--- IOIN (physical pin state as seen by the driver) ---"));
   Serial.print(F("  ms1      = "));
   Serial.println(driver.ms1());
@@ -73,9 +82,57 @@ void reportIOIN() {
   Serial.println(driver.enn());
 }
 
-void setup() {
+bool testMicrostepWriteRead(uint16_t requested)
+{
+  driver.microsteps(requested);
+  const uint16_t readback = driver.microsteps();
+
+  Serial.print(F("  set "));
+  Serial.print(requested);
+  Serial.print(F(" -> read "));
+  Serial.print(readback);
+  Serial.print(F("  "));
+
+  if (readback == requested)
+  {
+    Serial.println(F("PASS"));
+    return true;
+  }
+
+  Serial.println(F("FAIL"));
+  return false;
+}
+
+bool runMicrostepSweep()
+{
+  Serial.println(F("--- Microstep write/read sweep ---"));
+  bool allOk = true;
+
+  for (uint8_t i = 0; i < TEST_MICROSTEP_COUNT; i++)
+  {
+    if (!testMicrostepWriteRead(TEST_MICROSTEP_VALUES[i]))
+    {
+      allOk = false;
+    }
+  }
+
+  Serial.println();
+  if (allOk)
+  {
+    Serial.println(F("PASS: all microstep values read back correctly."));
+  }
+  else
+  {
+    Serial.println(F("FAIL: one or more microstep values did not read back."));
+  }
+  Serial.println();
+  return allOk;
+}
+
+void setup()
+{
   Serial.begin(115200);
-  delay(1000); // let USB serial settle; no while(!Serial) so battery works
+  delay(2000); // let USB serial settle; no while(!Serial) so battery works
 
   Serial.println(F("StepScreen DriverTest"));
   Serial.println(F("Bring-up test for TMC2209 UART -- run before any motor test."));
@@ -93,16 +150,16 @@ void setup() {
   Serial.print(F("driver.version() = 0x"));
   printHex8(ver);
 
-  if (ver != 0x21) {
+  if (ver != 0x21)
+  {
     Serial.println();
     Serial.println(F("FAIL: expected 0x21. UART is not communicating."));
     Serial.println(F("Check in order:"));
-    Serial.println(F("  1. TX/RX not swapped (D1=TX->1k->PDN, D0=RX->PDN)"));
+    Serial.println(F("  1. TX/RX crossed: D1(TX)->TMC RX, D0(RX)<-TMC TX"));
     Serial.println(F("  2. GND common between Feather and driver"));
     Serial.println(F("  3. VIO = 3.3V, not 5V"));
-    Serial.println(F("  4. 1k resistor is in the TX leg, not RX"));
+    Serial.println(F("  4. VM (motor supply) is ON"));
     Serial.println(F("  5. DRIVER_ADDRESS matches MS1/MS2 strapping (0b11 here)"));
-    Serial.println(F("  6. No filter capacitor on PDN_UART blocking the signal"));
     return;
   }
 
@@ -116,22 +173,13 @@ void setup() {
   driver.toff(5);                // chopper on
   driver.rms_current(TEST_RUN_CURRENT_MA);
   driver.intpol(true);
-  driver.microsteps(TEST_MICROSTEPS);
 
-  const uint16_t msRead = driver.microsteps();
-  Serial.print(F("Requested microsteps = "));
-  Serial.println(TEST_MICROSTEPS);
-  Serial.print(F("Readback microsteps  = "));
-  Serial.println(msRead);
-
-  if (msRead != TEST_MICROSTEPS) {
-    Serial.println(F("FAIL: microstep readback does not match. UART writes"));
-    Serial.println(F("are not landing (check RX leg / GND) even though reads work."));
+  if (!runMicrostepSweep())
+  {
     return;
   }
-  Serial.println(F("PASS: microstep register set and confirmed."));
-  Serial.println();
 
+  driver.microsteps(MOVE_MICROSTEPS);
   driverOk = true;
 
   // --- Physical move: confirms the UART-configured microstep count is
@@ -141,23 +189,25 @@ void setup() {
   delay(5); // TMC2209 needs a short settle after ~EN goes low
 
   const uint32_t stepsForOneTenthRev =
-      (200UL * TEST_MICROSTEPS) / 10; // 200 full steps/rev, 1/10 rev
+      (200UL * MOVE_MICROSTEPS) / 10; // 200 full steps/rev, 1/10 rev
 
   Serial.print(F("Moving "));
   Serial.print(stepsForOneTenthRev);
   Serial.print(F(" microsteps forward at 1/"));
-  Serial.print(TEST_MICROSTEPS);
+  Serial.print(MOVE_MICROSTEPS);
   Serial.println(F(" ..."));
 
   motor.setDirection(true);
-  for (uint32_t i = 0; i < stepsForOneTenthRev; i++) {
+  for (uint32_t i = 0; i < stepsForOneTenthRev; i++)
+  {
     motor.step();
     delayMicroseconds(300);
   }
 
   delay(300);
   motor.setDirection(false);
-  for (uint32_t i = 0; i < stepsForOneTenthRev; i++) {
+  for (uint32_t i = 0; i < stepsForOneTenthRev; i++)
+  {
     motor.step();
     delayMicroseconds(300);
   }
@@ -168,6 +218,7 @@ void setup() {
   Serial.println(F("Re-upload to repeat."));
 }
 
-void loop() {
+void loop()
+{
   // One-shot test; everything runs in setup(). Nothing to do here.
 }
