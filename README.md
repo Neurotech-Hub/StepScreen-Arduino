@@ -65,8 +65,10 @@ Board I/O (from `StepScreenBoard.h`):
 | `PIN_AUX_IN` | A5 | general-purpose digital input |
 | `PIN_VBAT` | A7 (pin 9) | battery voltage divider (reads VBAT/2) |
 | `PIN_I2C_SDA` / `PIN_I2C_SCL` | 20 / 21 | Wire |
+| `PIN_HX711_SCK` | PA30 (30) | SWCLK / board CLK — HX711 clock |
+| `PIN_HX711_DT` | PA31 (31) | SWDIO / board DIO — HX711 data |
 
-Optional helpers: `#include <StepScreenIO.h>` for output registry and input sampling; `#include <StepScreenIODisplay.h>` to render I/O status on the OLED; `#include <StepScreenSD.h>` for microSD mount/read/write with card-detect hot-plug. See the **IOTest** example.
+Optional helpers: `#include <StepScreenIO.h>` for output registry and input sampling; `#include <StepScreenIODisplay.h>` to render I/O status on the OLED; `#include <StepScreenSD.h>` for microSD mount/read/write with card-detect hot-plug; `#include <StepScreenHX711.h>` for HX711 load cell on SWD pads. See the **IOTest** and **LoadCellTest** examples.
 
 TMC2209 stepper (standalone step/dir, from `StepScreenBoard.h`):
 
@@ -97,6 +99,22 @@ void loop() {
 ```
 
 See **IOTest** for automatic output walk, live dashboard, and SD self-test on mount.
+
+### HX711 load cell (`StepScreenHX711`)
+
+The StepScreen board routes the HX711 to the SWD pads (PA30/PA31), silkscreened **CLK** and **DIO**. These pins are not in the stock Feather M0 Arduino pin map, so `StepScreenHX711` bit-bangs the HX711 protocol via SAMD PORT registers. SWD hardware debug is unavailable while the load cell is connected.
+
+```cpp
+#include <StepScreenHX711.h>
+
+StepScreenHX711 scale;
+scale.begin();
+scale.set_scale(420.0f);   // raw counts per gram — calibrate once
+scale.tare(10);
+float grams = scale.get_units(3);
+```
+
+See **LoadCellTest** for serial measure mode (200 ms) and **CAL** interactive calibration.
 
 All buttons are read active LOW with internal pullups; no external resistors are needed. Swap `PIN_ENC_A`/`PIN_ENC_B` to flip the encoder's rotation sign.
 
@@ -278,6 +296,7 @@ Call `pollNavEvents()` exactly once per loop — it consumes the underlying edge
 - **BasicUI** -- interactive demo: the encoder drives a counter, and each button highlights its action-column label. Includes the encoder ISR block.
 - **MotorTest** -- TMC2209 step/dir exercise without a motor connected. Blocking and non-blocking moves with Serial reporting; green LED blinks on each STEP pulse.
 - **IOTest** -- auto-walks each board output solo while a single dashboard shows inputs, encoder, VBAT, and SD status. SD self-test runs automatically when a card mounts.
+- **LoadCellTest** -- HX711 load cell on SWCLK/SWDIO (CLK/DIO). Measure mode prints grams every 200 ms; type **CAL** for interactive tare/scale calibration over Serial.
 - **SyringePump** -- three-screen pump controller built on `StepScreenNav` + `StepScreenStepper`. Home (motor off), Adjust (encoder jogs the motor; OK cycles Low/Med/Fast speed), Run (send a signed step count over Serial at 115200, e.g. `3200` + newline). Demonstrates the menu debounce pattern.
 - **Treadmill** -- rodent treadmill controller. Home shows speed (cm/s) and timeout (minutes) with the edited metric inverted (Back toggles Spd/Time, Sel toggles Fwd/Rev, encoder adjusts). Run ramps the belt to speed via `setSpeed()`/`runSpeed()`, counts down, then disables the motor and blinks DONE. Speed→steps mapping is a placeholder (`STEPSCREEN_TREADMILL_SPS_PER_CMS`).
 

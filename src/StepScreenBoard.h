@@ -78,6 +78,17 @@ static inline bool StepScreenSdCardInserted(uint8_t cdPin = PIN_SD_CD) {
 #define PIN_I2C_SCL 21 // Wire SCL (no onboard pullup)
 #endif
 
+// HX711 load cell amplifier on SWD pads (PA30/PA31). Not in the stock
+// Feather M0 pin map — use StepScreenHX711 for GPIO access. SWD debug is
+// unavailable while the load cell is wired.
+#ifndef PIN_HX711_SCK
+#define PIN_HX711_SCK 30 // PA30 / SWCLK — HX711 SCK
+#endif
+
+#ifndef PIN_HX711_DT
+#define PIN_HX711_DT 31 // PA31 / SWDIO — HX711 DT (data out)
+#endif
+
 // TMC2209 stepper driver (BIGTREETECH module, standalone step/dir mode).
 // MS1 + MS2 tied HIGH -> 1/16 microstepping. CLK tied GND -> internal clock.
 // UART/INDEX not connected. ~EN is active LOW.
