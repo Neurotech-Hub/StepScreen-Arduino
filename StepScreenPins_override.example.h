@@ -32,22 +32,29 @@
 // --- Board baseline ---
 // #define PIN_SD_CS 4
 // #define PIN_SD_CD 7
-// #define PIN_LED_GREEN 8
-// #define PIN_LED_RED 13
+// #define PIN_LED_GREEN 13
+// #define PIN_LED_RED A1
 // #define PIN_VBAT A7
 
 // --- User I/O ---
-// #define PIN_USER_LED1 13
-// #define PIN_USER_LED2 A1
+// #define PIN_USER_LED1 PIN_LED_GREEN
+// #define PIN_USER_LED2 PIN_LED_RED
 // #define PIN_EXT_LED A2
 // #define PIN_BEAM_DET A4
 // #define PIN_AUX_IN A5
+
+// --- SWCLK / SWDIO (HX711) ---
+// #define PIN_SWCLK 30
+// #define PIN_SWDIO 31
 
 // --- TMC2209 stepper ---
 // #define PIN_MOTOR_STEP 5
 // #define PIN_MOTOR_DIR 6
 // #define PIN_MOTOR_EN 9
-// #define STEPSCREEN_MOTOR_MICROSTEPS 16
+// #define PIN_MOTOR_UART_RX 0
+// #define PIN_MOTOR_UART_TX 1
+// #define STEPSCREEN_TMC2209_ADDRESS 0b11
+// #define STEPSCREEN_MOTOR_MICROSTEPS 128   // default; e.g. 64 or 256
 // #define STEPSCREEN_MOTOR_FULL_STEPS 200
 
 #endif // STEPSCREEN_PINS_OVERRIDE_H

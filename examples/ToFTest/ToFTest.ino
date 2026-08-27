@@ -9,11 +9,12 @@
           XSHUT optional -- set PIN_TOF_XSHUT if wired to the Feather
     RTC   optional at 0x68 (shares the bus; not used by this sketch)
     OLED  optional at 0x3C -- skipped automatically if not present
-    Motor BIGTREETECH TMC2209 standalone step/dir (MotorTest pins):
+    Motor BIGTREETECH TMC2209 step/dir (MotorTest pins):
             STEP -> D5  (PIN_MOTOR_STEP)
             DIR  -> D6  (PIN_MOTOR_DIR)
             ~EN  -> D9  (PIN_MOTOR_EN, active LOW) — held enabled
-            MS1/MS2 tied HIGH (1/16 microstepping, 3200 steps/rev)
+            UART -> D0/D1 half-duplex (StepScreenTMC2209)
+            MS1/MS2 tied HIGH -> UART address 0b11
 
   Serial commands (115200 baud, newline-terminated):
     MOVE <steps> [speed_sps]   Fixed move. Sign = direction.
@@ -33,7 +34,7 @@
   ToF readings print continuously as  tof=123 mm  (including during CONT).
 
   Dependencies (Library Manager):
-    stm32duino VL53L4CD, AccelStepper, Adafruit SH110X (+ GFX, BusIO)
+    stm32duino VL53L4CD, AccelStepper, TMCStepper, Adafruit SH110X (+ GFX, BusIO)
 
   Board: Adafruit Feather M0 Adalogger (or compatible).
 */
@@ -41,6 +42,7 @@
 #include <StepScreen.h>
 #include <StepScreenBoard.h>
 #include <StepScreenStepper.h>
+#include <StepScreenTMC2209.h>
 #include <Wire.h>
 #include <ctype.h>
 #include <stdlib.h>
@@ -63,6 +65,7 @@
 #define MAX_SPEED_SPS 2000.0f
 
 StepScreen screen;
+StepScreenTMC2209 tmc;
 StepScreenStepper stepper;
 VL53L4CD tof(&Wire, PIN_TOF_XSHUT);
 
@@ -78,6 +81,7 @@ float defaultSpeedSps = DEFAULT_SPEED_SPS;
 bool directionForward = true;
 bool tofOk = false;
 bool displayOk = false;
+bool motorReady = false;
 
 uint16_t lastRangeMm = 0;
 bool lastRangeValid = false;
@@ -125,6 +129,11 @@ void motionStop()
 
 void startFixedMove(int32_t steps, float speedSps)
 {
+  if (!motorReady)
+  {
+    Serial.println(F("motor not ready"));
+    return;
+  }
   if (steps == 0)
   {
     return;
@@ -151,6 +160,11 @@ void startFixedMove(int32_t steps, float speedSps)
 
 void startContinuous(float speedSps)
 {
+  if (!motorReady)
+  {
+    Serial.println(F("motor not ready"));
+    return;
+  }
   float sps = clampSpeed(speedSps);
   if (sps == 0.0f)
   {
@@ -613,8 +627,16 @@ void setup()
   }
 
   stepper.begin();
+  tmc.begin();
+  motorReady = tmc.verify() && tmc.configureForStepDir();
+  if (!motorReady) {
+    Serial.println(F("ToFTest: TMC2209 UART failed (ToF still available)"));
+    StepScreenTMC2209::printWiringHelp();
+  }
   stepper.setMaxSpeed(defaultSpeedSps);
-  stepper.enable();
+  if (motorReady) {
+    stepper.enable();
+  }
 
   Serial.println(F("StepScreen ToFTest (VL53L4CD)"));
   Serial.print(F("  STEP pin "));

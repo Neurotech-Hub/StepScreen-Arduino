@@ -2,22 +2,11 @@
 
 #include "StepScreenInput.h"
 
-// PIN_LED_RED omitted when it shares a pin with PIN_USER_LED1
-#if PIN_LED_RED == PIN_USER_LED1
-#define STEPSCREEN_IO_HAS_SEPARATE_RED 0
-#else
-#define STEPSCREEN_IO_HAS_SEPARATE_RED 1
-#endif
-
 const StepScreenIO::OutputChannel StepScreenIO::_channels[] = {
     {PIN_USER_LED1, "LED1", false, false},
     {PIN_USER_LED2, "LED2", false, false},
     {PIN_EXT_LED, "EXT", false, false},
-    {PIN_LED_GREEN, "GRN", false, false},
-#if STEPSCREEN_IO_HAS_SEPARATE_RED
-    {PIN_LED_RED, "RED", false, false},
-#endif
-    {PIN_MOTOR_EN, "MEN", true, false},  // ~EN active LOW
+    {PIN_MOTOR_EN, "MEN", true, false}, // ~EN active LOW
     {PIN_MOTOR_DIR, "MDIR", false, false},
     {PIN_MOTOR_STEP, "STEP", false, true},
 };

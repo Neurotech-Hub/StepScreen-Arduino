@@ -1,15 +1,12 @@
 /*!
  * @file StepScreenMotor.h
  *
- * Step/dir driver for a BIGTREETECH TMC2209 module in standalone mode.
+ * Step/dir pulse generator for the BIGTREETECH TMC2209 module.
  *
- * Hardware assumptions (configured by strap pins, not software):
- *   MS1 + MS2 tied HIGH  -> 1/16 microstepping
- *   CLK tied GND         -> internal oscillator
- *   UART / DIAG          -> not connected
+ * MS1 + MS2 tied HIGH sets the UART address (0b11). Runtime microstep
+ * count is configured via StepScreenTMC2209 before enable().
  *
- * The driver exposes STEP, DIR, and ~EN (active LOW). No UART configuration
- * is performed; this class generates step pulses only.
+ * Exposes STEP, DIR, and ~EN (active LOW). No UART configuration here.
  *
  * Include independently of StepScreen.h:
  *   #include <StepScreenMotor.h>

@@ -10,20 +10,20 @@ constexpr uint8_t kGain128 = 128;
 
 PortGroup *hx711Port() { return &PORT->Group[0]; }
 
-inline uint32_t sckMask() { return (1ul << PIN_HX711_SCK); }
+inline uint32_t sckMask() { return (1ul << PIN_SWCLK); }
 
-inline uint32_t dtMask() { return (1ul << PIN_HX711_DT); }
+inline uint32_t dtMask() { return (1ul << PIN_SWDIO); }
 
 } // namespace
 
 void StepScreenHX711::configureGpio() {
   PortGroup *port = hx711Port();
 
-  port->PINCFG[PIN_HX711_SCK].reg = PORT_PINCFG_INEN | PORT_PINCFG_DRVSTR;
+  port->PINCFG[PIN_SWCLK].reg = PORT_PINCFG_INEN | PORT_PINCFG_DRVSTR;
   port->DIRSET.reg = sckMask();
   port->OUTCLR.reg = sckMask();
 
-  port->PINCFG[PIN_HX711_DT].reg = PORT_PINCFG_INEN | PORT_PINCFG_PULLEN;
+  port->PINCFG[PIN_SWDIO].reg = PORT_PINCFG_INEN | PORT_PINCFG_PULLEN;
   port->DIRCLR.reg = dtMask();
   port->OUTSET.reg = dtMask();
 }

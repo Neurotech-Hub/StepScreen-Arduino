@@ -15,8 +15,8 @@
             OK cycles the speed preset (Low -> Med -> Fast).
             Back returns Home. Shows position, speed, encoder input.
   Run    -- motor disabled until a serial command arrives. Send a signed
-            integer + newline (e.g. "3200" or "-500") at 115200 baud to
-            move that many microsteps (1/16 microstepping: 3200 = 1 rev).
+            integer + newline (e.g. steps equal to STEPSCREEN_MOTOR_STEPS_PER_REV
+            for one revolution) at 115200 baud to move that many microsteps.
             Back returns Home (stops any move). Shows command status.
 
   Navigation debouncing (StepScreenNav): button edges are discarded for
@@ -33,15 +33,21 @@
 
 #include <StepScreen.h>
 #include <StepScreenNav.h>
+#include <StepScreenRTC.h>
 #include <StepScreenSplash.h>
 #include <StepScreenStepper.h>
+#include <StepScreenTMC2209.h>
 
 StepScreen screen;
+StepScreenRTC rtc;
 StepScreenNav nav;
+StepScreenTMC2209 tmc;
 StepScreenStepper stepper;
 
-// Microsteps per encoder detent on the Adjust screen (16 = 1 full step)
-#define JOG_STEPS_PER_DETENT 16
+// Microsteps per encoder detent on the Adjust screen (1 full step per detent)
+#define JOG_STEPS_PER_DETENT STEPSCREEN_MOTOR_MICROSTEPS
+
+bool motorReady = false;
 
 // Display refresh throttling (OLED I2C transfer blocks stepping)
 #define DRAW_INTERVAL_MS 100
@@ -102,7 +108,9 @@ void enterSize() {
 void enterAdjust() {
   currentScreen = SCREEN_ADJUST;
   lastEncoderDelta = 0;
-  stepper.enable();
+  if (motorReady) {
+    stepper.enable();
+  }
   nav.enterScreen();
   Serial.println(F("[Adjust] encoder jogs motor"));
 }
@@ -116,7 +124,8 @@ void enterRun() {
     Serial.read(); // flush stale input
   }
   nav.enterScreen();
-  Serial.println(F("[Run] send signed steps + newline, e.g. 3200"));
+  Serial.print(F("[Run] send signed steps + newline, e.g. "));
+  Serial.println(STEPSCREEN_MOTOR_STEPS_PER_REV);
 }
 
 // --- Run-screen serial protocol ---
@@ -147,6 +156,11 @@ void handleSerialCommand() {
       }
 
       lastCommandSteps = steps;
+      if (!motorReady) {
+        runStatus = RUN_ERROR;
+        Serial.println(F("error: motor not ready"));
+        continue;
+      }
       stepper.enable();
       stepper.moveSigned(steps);
       runStatus = RUN_MOVING;
@@ -215,7 +229,7 @@ void handleAdjust(uint8_t ev, int32_t enc) {
     Serial.print(F("speed: "));
     Serial.println(stepper.speedPresetName());
   }
-  if (enc != 0) {
+  if (enc != 0 && motorReady) {
     lastEncoderDelta = enc;
     stepper.jogSteps(enc * JOG_STEPS_PER_DETENT);
   }
@@ -232,7 +246,9 @@ void handleRun(uint8_t ev) {
 // --- Drawing ---
 
 void drawHome(StepScreenDisplay &d) {
-  d.drawInfoBar("-- --:--"); // datetime placeholder until RTC
+  char infoBar[12];
+  rtc.formatInfoBar(infoBar, sizeof(infoBar));
+  d.drawInfoBar(infoBar);
   // "mL" / "Adj" / "Run" — Back opens the size picker
   const StepScreenActionLabels labels = {"mL", "Adj", "Run"};
   d.drawActionColumn(labels, nav.readBack(), nav.readPush(),
@@ -367,8 +383,18 @@ void setup() {
     }
   }
 
+  rtc.begin();
+  rtc.syncFromBuildTimeIfNeeded();
+
   nav.begin(&screen.input());
-  stepper.begin(); // driver starts disabled
+
+  tmc.begin();
+  motorReady = stepper.beginWithDriver(tmc);
+  if (!motorReady) {
+    Serial.println(F("TMC2209 UART failed — UI only, no motion."));
+    StepScreenTMC2209::printWiringHelp();
+    stepper.begin();
+  }
 
   // --- STEPSCREEN ENCODER ISR SETUP (copy into setup()) ---
   STEPSCREEN_ATTACH_ENCODER_ISRS();

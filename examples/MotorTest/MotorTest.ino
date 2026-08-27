@@ -6,24 +6,27 @@
   over Serial. The green LED blinks on each STEP pulse so you can verify
   output even without a scope.
 
-  Hardware (BIGTREETECH TMC2209, standalone mode):
+  Hardware (BIGTREETECH TMC2209 on StepScreen):
     STEP  -> D5  (PIN_MOTOR_STEP)
     DIR   -> D6  (PIN_MOTOR_DIR)
     ~EN   -> D9  (PIN_MOTOR_EN, active LOW)
-    MS1/MS2 tied HIGH (1/16 microstepping, 3200 steps/rev for 200-step motor)
-    CLK tied GND (internal clock)
+    UART  -> D0/D1 half-duplex to PDN_UART (configured via StepScreenTMC2209)
+    MS1/MS2 tied HIGH -> UART address 0b11
 
   Sequence:
-    1. Enable driver, move forward 320 microsteps (1/10 rev) blocking
-    2. Pause, move reverse 320 microsteps blocking
-    3. Run 640 microsteps at 800 steps/sec using non-blocking runSpeed()
-    4. Disable driver, idle
+    1. UART verify + configureForStepDir()
+    2. Enable driver, move forward 1/10 rev blocking
+    3. Pause, move reverse 1/10 rev blocking
+    4. Run 2× that distance at 800 steps/sec using non-blocking runSpeed()
+    5. Disable driver, idle
 
   Board: Adafruit Feather M0 Adalogger (or compatible).
 */
 
 #include <StepScreenMotor.h>
+#include <StepScreenTMC2209.h>
 
+StepScreenTMC2209 tmc;
 StepScreenMotor motor;
 
 enum TestPhase {
@@ -37,8 +40,8 @@ enum TestPhase {
 
 TestPhase phase = PHASE_FORWARD;
 uint32_t phaseStartMs = 0;
+bool motorReady = false;
 
-// 320 microsteps = 1/10 revolution at 1/16 microstepping
 const uint32_t TEST_STEPS = STEPSCREEN_MOTOR_STEPS_PER_REV / 10;
 const uint32_t STEP_DELAY_US = 800;
 
@@ -65,8 +68,23 @@ void setup() {
   pinMode(PIN_LED_GREEN, OUTPUT);
   digitalWrite(PIN_LED_GREEN, LOW);
 
-  motor.begin();
   Serial.println(F("TMC2209 MotorTest (no motor required)"));
+
+  tmc.begin();
+  if (!tmc.verify()) {
+    Serial.println(F("UART verify failed — step/dir test skipped."));
+    StepScreenTMC2209::printWiringHelp();
+    phase = PHASE_DONE;
+    return;
+  }
+  if (!tmc.configureForStepDir()) {
+    Serial.println(F("configureForStepDir failed."));
+    phase = PHASE_DONE;
+    return;
+  }
+  motorReady = true;
+
+  motor.begin();
   Serial.print(F("  STEP pin "));
   Serial.println(motor.stepPin());
   Serial.print(F("  DIR  pin "));
@@ -82,6 +100,10 @@ void setup() {
 }
 
 void loop() {
+  if (!motorReady) {
+    return;
+  }
+
   switch (phase) {
   case PHASE_FORWARD:
     Serial.print(F("Blocking forward "));

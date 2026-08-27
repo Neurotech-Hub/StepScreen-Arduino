@@ -27,6 +27,7 @@ Sketches still use `#include <StepScreen.h>` — the IDE adds `src/` to the incl
 
 - **Board**: ATSAMD21G18 @ 48 MHz, 3.3V logic (select "Adafruit Feather M0" in the Arduino IDE)
 - **Display**: 1.3" 128x64 monochrome OLED, SH1106 driver, I2C at `0x3C` on `Wire` (pins 20/21)
+- **RTC**: PCF8523 on the same I2C bus at `0x68` (Adalogger onboard RTC; optional)
 - **Encoder**: EC11, 20 pulses / 20 detents, with push switch
 - **Buttons**: independent back and confirm buttons on the module
 
@@ -38,6 +39,8 @@ Install via the Arduino Library Manager:
 - Adafruit GFX Library
 - Adafruit BusIO
 - AccelStepper (used by `StepScreenStepper`)
+- TMCStepper (used by `StepScreenTMC2209`)
+- RTClib (used by `StepScreenRTC`)
 
 ## Pin map
 
@@ -57,28 +60,35 @@ Board I/O (from `StepScreenBoard.h`):
 |---|---|---|
 | `PIN_SD_CS` | 4 | microSD chip select |
 | `PIN_SD_CD` | 7 | card detect (`STEPSCREEN_SD_CD_INSERTED`, default LOW) |
-| `PIN_LED_GREEN` | 8 | Adalogger green LED (SD area) |
-| `PIN_LED_RED` / `PIN_USER_LED1` | 13 | Adalogger red LED; same pin on this board |
-| `PIN_USER_LED2` | A1 | user indicator LED |
+| `PIN_LED_GREEN` / `PIN_USER_LED1` | 13 | green user LED (D13) |
+| `PIN_LED_RED` / `PIN_USER_LED2` | A1 | red user LED |
 | `PIN_EXT_LED` | A2 | external LED via N-MOSFET (220 Ω gate, 10 kΩ pulldown); HIGH = ON |
 | `PIN_BEAM_DET` | A4 | photodetector; **external pull-up** — use `INPUT`, no internal pullup |
 | `PIN_AUX_IN` | A5 | general-purpose digital input |
 | `PIN_VBAT` | A7 (pin 9) | battery voltage divider (reads VBAT/2) |
 | `PIN_I2C_SDA` / `PIN_I2C_SCL` | 20 / 21 | Wire |
-| `PIN_HX711_SCK` | PA30 (30) | SWCLK / board CLK — HX711 clock |
-| `PIN_HX711_DT` | PA31 (31) | SWDIO / board DIO — HX711 data |
+| `STEPSCREEN_RTC_I2C_ADDR` | 0x68 | PCF8523 RTC (optional) |
+| `PIN_SWCLK` / `PIN_SWDIO` | PA30 (30) / PA31 (31) | silkscreen SWCLK / SWDIO — HX711 SCK/DT |
+| `PIN_HX711_SCK` / `PIN_HX711_DT` | PA30 / PA31 | aliases of `PIN_SWCLK` / `PIN_SWDIO` |
 
-Optional helpers: `#include <StepScreenIO.h>` for output registry and input sampling; `#include <StepScreenIODisplay.h>` to render I/O status on the OLED; `#include <StepScreenSD.h>` for microSD mount/read/write with card-detect hot-plug; `#include <StepScreenHX711.h>` for HX711 load cell on SWD pads. See the **IOTest** and **LoadCellTest** examples.
+Optional helpers: `#include <StepScreenIO.h>` for output registry and input sampling; `#include <StepScreenIODisplay.h>` to render I/O status on the OLED; `#include <StepScreenSD.h>` for microSD mount/read/write with card-detect hot-plug; `#include <StepScreenHX711.h>` for HX711 load cell on SWD pads; `#include <StepScreenRTC.h>` for PCF8523 date/time. See the **IOTest**, **LoadCellTest**, **Treadmill**, and **SyringePump** examples.
 
-TMC2209 stepper (standalone step/dir, from `StepScreenBoard.h`):
+TMC2209 stepper (step/dir + half-duplex UART, from `StepScreenBoard.h`):
 
 | Symbol | Default pin | Notes |
 |---|---|---|
 | `PIN_MOTOR_STEP` | 5 | STEP pulse |
 | `PIN_MOTOR_DIR` | 6 | direction |
 | `PIN_MOTOR_EN` | 9 | ~EN, active LOW (LOW = enabled) |
+| `PIN_MOTOR_UART_RX` | 0 | D0 — half-duplex UART node with TX |
+| `PIN_MOTOR_UART_TX` | 1 | D1 — 1kΩ in series to TMC PDN_UART |
 
-MS1 and MS2 are tied HIGH on the module (1/16 microstepping). CLK is tied GND (internal clock). UART/DIAG are not used. `STEPSCREEN_MOTOR_STEPS_PER_REV` defaults to 3200 (200 full steps × 16 microsteps).
+MS1 and MS2 are tied HIGH on the module (UART address `0b11`). Runtime microstep count is configured over UART via `StepScreenTMC2209`, not the strap pins. `STEPSCREEN_MOTOR_MICROSTEPS` defaults to **128**; `STEPSCREEN_MOTOR_STEPS_PER_REV` is derived (200 full steps × microsteps). Override in a sketch before includes:
+
+```cpp
+#define STEPSCREEN_MOTOR_MICROSTEPS 64
+#include <StepScreenStepper.h>
+```
 
 ### microSD (`StepScreenSD`)
 
@@ -99,6 +109,26 @@ void loop() {
 ```
 
 See **IOTest** for automatic output walk, live dashboard, and SD self-test on mount.
+
+**SD timestamps:** Arduino `SD.h` does not wire the RTC into FAT directory entry timestamps, so files may show incorrect dates in the OS. For correct FAT times, a future change would need SdFat with `FsDateTime::setCallback`. Until then, prefix log lines with `StepScreenRTC::formatLogTimestamp()` in the file content itself.
+
+### RTC (`StepScreenRTC`)
+
+The Adalogger PCF8523 shares `Wire` with the OLED at `STEPSCREEN_RTC_I2C_ADDR` (default `0x68`). Call `begin()` after the display (or any other code that starts I2C). `syncFromBuildTimeIfNeeded()` sets the clock from the firmware build stamp (`__DATE__` / `__TIME__`) when the RTC is unset, lost power, or behind the compile time.
+
+```cpp
+#include <StepScreenRTC.h>
+
+StepScreenRTC rtc;
+rtc.begin();                        // after screen.begin()
+rtc.syncFromBuildTimeIfNeeded();    // sets from __DATE__/__TIME__ when needed
+
+char header[12];
+rtc.formatInfoBar(header, sizeof(header));
+screen.drawInfoBar(header);
+```
+
+If the RTC is absent, `formatInfoBar()` returns `"-- --:--"` and the sketch continues normally. See **Treadmill** and **SyringePump** for live date/time in the info bar.
 
 ### HX711 load cell (`StepScreenHX711`)
 
@@ -195,9 +225,51 @@ Buttons are polled and debounced (no interrupts needed): `readBack()` / `readPus
 
 SAMD21 note: pins 12 and 10 use separate EXTINT lines, so the default mapping is safe. If you remap the encoder, the two pins must not share an EXTINT line.
 
-## TMC2209 motor driver
+## TMC2209 UART: StepScreenTMC2209
 
-`StepScreenMotor` drives a BIGTREETECH TMC2209 in standalone step/dir mode (no UART). Include it independently of the display stack:
+Half-duplex UART on D0/D1 configures the BIGTREETECH TMC2209 before motion. Wiring:
+
+```text
+D1 (TX) --[1kΩ]--+-- TMC PDN_UART
+D0 (RX) ---------+
+TMC TX pad: NC
+```
+
+Call `configureForStepDir()` before `enable()` on `StepScreenMotor` or `StepScreenStepper`:
+
+```cpp
+#include <StepScreenTMC2209.h>
+#include <StepScreenStepper.h>
+
+StepScreenTMC2209 tmc;
+StepScreenStepper stepper;
+
+void setup() {
+  tmc.begin();
+  if (!tmc.verify()) {
+    StepScreenTMC2209::printWiringHelp();
+    return;
+  }
+  tmc.configureForStepDir();           // uses STEPSCREEN_MOTOR_MICROSTEPS
+  // tmc.configureForStepDir(64);      // optional per-call override
+  stepper.begin();                     // or stepper.beginWithDriver(tmc);
+  stepper.enable();
+}
+```
+
+| Call | Purpose |
+|---|---|
+| `begin()` | Start Serial1 + driver |
+| `verify()` | Confirm UART link (`version()` == 0x21) |
+| `configureForStepDir(microsteps, mA)` | UART mode, chopper, current, microsteps |
+| `driver()` | Raw `TMC2209Stepper` for advanced register access |
+| `printWiringHelp()` | Serial wiring checklist |
+
+See **DriverTest** (Troubleshooting) for a full UART bring-up sequence.
+
+## TMC2209 step/dir: StepScreenMotor
+
+`StepScreenMotor` generates STEP/DIR/~EN pulses only — no UART. Use after `StepScreenTMC2209::configureForStepDir()`:
 
 ```cpp
 #include <StepScreenMotor.h>
@@ -207,7 +279,7 @@ StepScreenMotor motor;
 void setup() {
   motor.begin();
   motor.enable();
-  motor.moveStepsSigned(320); // 1/10 rev forward at 1/16 microstepping
+  motor.moveStepsSigned(STEPSCREEN_MOTOR_STEPS_PER_REV / 10);
 }
 
 void loop() {
@@ -229,17 +301,22 @@ void loop() {
 
 ## Application motion: StepScreenStepper (AccelStepper)
 
-For application motion — acceleration, non-blocking moves, speed presets — use `StepScreenStepper`, a thin wrapper around [AccelStepper](https://www.airspayce.com/mikem/arduino/AccelStepper/) in DRIVER mode with the board's pins and ~EN polarity preconfigured. `StepScreenMotor` remains the raw pin-level option for hardware bring-up.
+For application motion — acceleration, non-blocking moves, speed presets — use `StepScreenStepper`, a thin wrapper around [AccelStepper](https://www.airspayce.com/mikem/arduino/AccelStepper/) in DRIVER mode with the board's pins and ~EN polarity preconfigured. Configure UART first via `StepScreenTMC2209`; `StepScreenMotor` remains the raw pin-level option for hardware bring-up.
 
 ```cpp
+#include <StepScreenTMC2209.h>
 #include <StepScreenStepper.h>
 
+StepScreenTMC2209 tmc;
 StepScreenStepper stepper;
 
 void setup() {
+  tmc.begin();
+  tmc.verify();
+  tmc.configureForStepDir();
   stepper.begin();          // driver starts disabled
   stepper.enable();
-  stepper.moveSigned(3200); // one revolution at 1/16 microstepping
+  stepper.moveSigned(STEPSCREEN_MOTOR_STEPS_PER_REV);
 }
 
 void loop() {
@@ -249,7 +326,8 @@ void loop() {
 
 | Call | Purpose |
 |---|---|
-| `begin()` | Configure pins + defaults; driver starts disabled |
+| `begin()` | Configure pins + defaults; UART must be configured first |
+| `beginWithDriver(tmc)` | `verify()` + `configureForStepDir()` + `begin()` |
 | `enable()` / `disable()` | Toggle ~EN; `disable()` also cancels pending motion |
 | `jogSteps(n)` / `moveSigned(n)` | Relative moves (poll `run()` until done) |
 | `run()` | Step generator; returns `true` while a move is pending |
@@ -294,10 +372,11 @@ Call `pollNavEvents()` exactly once per loop — it consumes the underlying edge
 
 - **ScreenTest** -- display validation followed by an interactive control check (encoder + all three buttons). Run this first on new hardware.
 - **BasicUI** -- interactive demo: the encoder drives a counter, and each button highlights its action-column label. Includes the encoder ISR block.
-- **MotorTest** -- TMC2209 step/dir exercise without a motor connected. Blocking and non-blocking moves with Serial reporting; green LED blinks on each STEP pulse.
+- **MotorTest** -- TMC2209 UART verify + step/dir exercise without a motor connected. Blocking and non-blocking moves with Serial reporting; green LED blinks on each STEP pulse.
+- **DriverTest** (Troubleshooting) -- UART bring-up: version check, microstep register sweep, physical move at `STEPSCREEN_MOTOR_MICROSTEPS`.
 - **IOTest** -- auto-walks each board output solo while a single dashboard shows inputs, encoder, VBAT, and SD status. SD self-test runs automatically when a card mounts.
 - **LoadCellTest** -- HX711 load cell on SWCLK/SWDIO (CLK/DIO). Measure mode prints grams every 200 ms; type **CAL** for interactive tare/scale calibration over Serial.
-- **SyringePump** -- three-screen pump controller built on `StepScreenNav` + `StepScreenStepper`. Home (motor off), Adjust (encoder jogs the motor; OK cycles Low/Med/Fast speed), Run (send a signed step count over Serial at 115200, e.g. `3200` + newline). Demonstrates the menu debounce pattern.
+- **SyringePump** -- three-screen pump controller built on `StepScreenNav` + `StepScreenStepper`. Home (motor off), Adjust (encoder jogs the motor; OK cycles Low/Med/Fast speed), Run (send a signed step count over Serial at 115200 — one revolution equals `STEPSCREEN_MOTOR_STEPS_PER_REV`). Demonstrates the menu debounce pattern.
 - **Treadmill** -- rodent treadmill controller. Home shows speed (cm/s) and timeout (minutes) with the edited metric inverted (Back toggles Spd/Time, Sel toggles Fwd/Rev, encoder adjusts). Run ramps the belt to speed via `setSpeed()`/`runSpeed()`, counts down, then disables the motor and blinks DONE. Speed→steps mapping is a placeholder (`STEPSCREEN_TREADMILL_SPS_PER_CMS`).
 
 ## API summary
@@ -309,7 +388,7 @@ Call `pollNavEvents()` exactly once per loop — it consumes the underlying edge
 | `screen.input()` | Buttons + encoder |
 | `drawInfoBar(title, highlightBack)` | Inverted top bar with left-aligned title |
 | `drawActionColumn(back, push, confirm)` | Right-justified Back/Sel/OK labels |
-| `drawActionColumn(labels, back, push, confirm)` | Per-screen labels via `StepScreenActionLabels`; `nullptr` renders as `----` (unavailable). Labels longer than 4 chars are truncated |
+| `drawActionColumn(labels, back, push, confirm)` | Per-screen labels via `StepScreenActionLabels`; `nullptr` leaves that slot blank (unavailable). Labels longer than 4 chars are truncated |
 | `clearContentArea()` | Clear only the content zone, cursor to its origin |
 | `drawLayoutGuides()` | Zone borders + corner markers (for testing) |
 

@@ -34,12 +34,11 @@ void StepScreenDisplay::drawActionColumn(bool backActive, bool pushActive,
 void StepScreenDisplay::drawActionColumn(const StepScreenActionLabels &labels,
                                          bool backActive, bool pushActive,
                                          bool confirmActive) {
-  drawActionLabel(labels.back ? labels.back : "----", STEPSCREEN_BTN_BACK_Y,
+  drawActionLabel(labels.back, STEPSCREEN_BTN_BACK_Y,
                   labels.back != nullptr && backActive);
-  drawActionLabel(labels.push ? labels.push : "----", STEPSCREEN_BTN_PUSH_Y,
+  drawActionLabel(labels.push, STEPSCREEN_BTN_PUSH_Y,
                   labels.push != nullptr && pushActive);
-  drawActionLabel(labels.confirm ? labels.confirm : "----",
-                  STEPSCREEN_BTN_CONFIRM_Y,
+  drawActionLabel(labels.confirm, STEPSCREEN_BTN_CONFIRM_Y,
                   labels.confirm != nullptr && confirmActive);
 }
 
@@ -73,6 +72,17 @@ void StepScreenDisplay::drawLayoutGuides() {
 
 void StepScreenDisplay::drawActionLabel(const char *label, int16_t y,
                                         bool active) {
+  const int16_t boxY = (y > 0) ? y - 1 : 0;
+
+  // Clear this label's strip inside the action column so labels can be
+  // redrawn (e.g. the labeled column replacing the info bar's "Back").
+  fillRect(STEPSCREEN_ACTION_COL_X + 1, boxY,
+           STEPSCREEN_W - STEPSCREEN_ACTION_COL_X - 1, 9, SH110X_BLACK);
+
+  if (label == nullptr || label[0] == '\0') {
+    return;
+  }
+
   // Cap at 4 chars so labels stay inside the 28px action column
   // (6px/char at size 1). Longer strings are truncated, not wrapped.
   char clipped[5];
@@ -85,12 +95,6 @@ void StepScreenDisplay::drawActionLabel(const char *label, int16_t y,
 
   const int16_t w = 6 * (int16_t)n;
   const int16_t x = STEPSCREEN_W - w - 1; // right-justified
-  const int16_t boxY = (y > 0) ? y - 1 : 0;
-
-  // Clear this label's strip inside the action column so labels can be
-  // redrawn (e.g. the labeled column replacing the info bar's "Back").
-  fillRect(STEPSCREEN_ACTION_COL_X + 1, boxY,
-           STEPSCREEN_W - STEPSCREEN_ACTION_COL_X - 1, 9, SH110X_BLACK);
 
   setTextSize(1);
   if (active) {

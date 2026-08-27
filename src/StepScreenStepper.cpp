@@ -1,5 +1,7 @@
 #include "StepScreenStepper.h"
 
+#include "StepScreenTMC2209.h"
+
 void StepScreenStepper::begin() {
   // Invert only the enable pin: ~EN is active LOW on the TMC2209.
   // setPinsInverted must precede setEnablePin so the pin is driven with
@@ -10,6 +12,17 @@ void StepScreenStepper::begin() {
   _stepper.setAcceleration(_accel);
   setSpeedPreset(_preset);
   disable(); // start with the driver off
+}
+
+bool StepScreenStepper::beginWithDriver(StepScreenTMC2209 &tmc) {
+  if (!tmc.isReady() && !tmc.verify()) {
+    return false;
+  }
+  if (!tmc.configureForStepDir()) {
+    return false;
+  }
+  begin();
+  return true;
 }
 
 void StepScreenStepper::enable() {

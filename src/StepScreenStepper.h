@@ -1,13 +1,12 @@
 /*!
  * @file StepScreenStepper.h
  *
- * AccelStepper-based motion control for the TMC2209 (standalone
- * step/dir mode). Complements the low-level StepScreenMotor class:
- * use StepScreenStepper for application motion (acceleration,
- * non-blocking moves, speed presets) and StepScreenMotor for raw
- * pin-level testing.
+ * AccelStepper-based motion control for the TMC2209 (step/dir mode).
+ * Complements StepScreenMotor (raw pulses) and StepScreenTMC2209 (UART).
  *
- * Requires the AccelStepper library (Library Manager).
+ * Call StepScreenTMC2209::configureForStepDir() before enable().
+ * Speed presets are in microsteps/sec; one revolution is
+ * STEPSCREEN_MOTOR_STEPS_PER_REV microsteps.
  *
  * Include independently of StepScreen.h:
  *   #include <StepScreenStepper.h>
@@ -23,8 +22,7 @@
 
 #include "StepScreenBoard.h"
 
-// Speed presets in microsteps/sec (1/16 microstepping -> 3200/rev).
-// Override any of these before including the library.
+// Speed presets in microsteps/sec. Override before including the library.
 #ifndef STEPSCREEN_SPEED_LOW_SPS
 #define STEPSCREEN_SPEED_LOW_SPS 200.0f
 #endif
@@ -48,6 +46,8 @@ enum StepScreenSpeedPreset : uint8_t {
   STEPSCREEN_SPEED_FAST = 2,
 };
 
+class StepScreenTMC2209;
+
 class StepScreenStepper {
 public:
   // Constructor is inline so pin/speed macro defaults resolve in the
@@ -65,8 +65,12 @@ public:
   }
 
   // Configures pins (driver starts DISABLED) and applies the default
-  // speed preset + acceleration.
+  // speed preset + acceleration. UART must be configured first.
   void begin();
+
+  // Verify UART link, configure microsteps, then begin(). Returns false
+  // if tmc.verify() fails (call tmc.begin() before this).
+  bool beginWithDriver(StepScreenTMC2209 &tmc);
 
   // ~EN is active LOW; handled via AccelStepper pin inversion.
   // disable() also cancels any pending motion.

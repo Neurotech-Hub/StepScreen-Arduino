@@ -53,6 +53,9 @@ public:
   bool appendLine(const char *path, const char *line);
   bool readLine(const char *path, char *buf, size_t bufLen);
 
+  // Create a directory if missing (8.3-safe names; no-op when not mounted).
+  bool ensureDirectory(const char *path);
+
   // Write IOTEST.TXT, read it back, verify payload. Leaves the file on card.
   bool runSelfTest();
 

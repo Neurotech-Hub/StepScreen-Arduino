@@ -4,7 +4,7 @@
   Automatic board bring-up test — no menu navigation required.
 
   On boot:
-    - Walks each output solo for 1.5 s (LED1, LED2, EXT, GRN, MEN, MDIR, STEP…)
+    - Walks each output solo for 1.5 s (LED1, LED2, EXT, MEN, MDIR, STEP)
     - Shows live inputs on one dashboard (beam, aux, buttons, encoder, VBAT, SD)
     - Mounts SD when inserted; runs a write/read self-test once per mount
 
@@ -127,7 +127,8 @@ void drawDashboard(const StepScreenInputs &inputs) {
 
 void setup() {
   Serial.begin(115200);
-  delay(1000);
+  delay(2000);
+  Serial.println("Serial ready...");
 
   if (!screen.begin()) {
     Serial.println(F("IOTest: display not found"));

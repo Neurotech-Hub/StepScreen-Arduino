@@ -20,7 +20,7 @@
 #include "StepScreenPins.h"
 
 // Per-screen action column labels. nullptr means the button is not
-// available on this screen and is drawn as "----" (never highlighted).
+// available on this screen — that slot is left blank (never highlighted).
 // Labels longer than 4 characters are truncated when drawn.
 struct StepScreenActionLabels {
   const char *back;
@@ -48,8 +48,8 @@ public:
   void drawActionColumn(bool backActive, bool pushActive,
                         bool confirmActive);
 
-  // Same, with per-screen labels; nullptr entries render as "----"
-  // (unavailable) and ignore the corresponding active flag.
+  // Same, with per-screen labels; nullptr entries are left blank and ignore
+  // the corresponding active flag.
   void drawActionColumn(const StepScreenActionLabels &labels, bool backActive,
                         bool pushActive, bool confirmActive);
 

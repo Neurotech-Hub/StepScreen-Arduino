@@ -138,6 +138,26 @@ void StepScreenSD::update() {
   _nextMountTryMs = millis() + MOUNT_RETRY_MS;
 }
 
+bool StepScreenSD::ensureDirectory(const char *path) {
+  if (!isReady() || path == nullptr || path[0] == '\0') {
+    setError("mkdir unavailable");
+    return false;
+  }
+
+  if (SD.exists(path)) {
+    setError(nullptr);
+    return true;
+  }
+
+  if (!SD.mkdir(path)) {
+    setError("mkdir failed");
+    return false;
+  }
+
+  setError(nullptr);
+  return true;
+}
+
 bool StepScreenSD::writeFile(const char *path, const uint8_t *data, size_t len,
                              bool append) {
   if (!isReady() || path == nullptr || data == nullptr || len == 0) {
