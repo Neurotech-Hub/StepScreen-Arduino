@@ -1,8 +1,17 @@
 # StepScreen
 
-Arduino UI library for a custom board modeled after the [Adafruit Feather M0 Adalogger](https://learn.adafruit.com/adafruit-feather-m0-adalogger/pinouts), paired with a 1.3" SH1106 OLED + EC11 rotary encoder module (I2C display, three active-LOW buttons: back, confirm, and encoder push).
+**StepScreen** is the control platform behind Neurotech Hub instruments — a compact board and software stack that pairs a sharp OLED display and rotary encoder with precision stepper motion, onboard storage, and lab-ready I/O.
 
-Built on the [Adafruit SH110X](https://github.com/adafruit/Adafruit_SH110X) driver, so the full Adafruit_GFX API is available alongside the StepScreen layout helpers.
+Built for hands-on neuroscience and behavioral setups, StepScreen powers applications like syringe pumps and rodent treadmills: set parameters on-device, start a run with a single button, and keep the experiment moving without a laptop in the cage room. The same hardware also supports load cells, beam detectors, indicator lights, and battery-aware field use.
+
+What you get:
+
+- **On-device UI** — 1.3" OLED with encoder and dedicated Back / Select / Confirm controls for clear, gloved-hand menus
+- **Motion control** — quiet, accurate stepper driving for pumps, belts, and custom actuators
+- **Experiment I/O** — sensors, LEDs, external triggers, and microSD logging on a familiar Feather-class footprint
+- **Ready-to-run apps** — example firmware for syringe delivery and treadmill sessions you can deploy or adapt
+
+Open-source firmware and pin maps live below for builders who want to extend or rebrand the platform.
 
 ## Library structure
 
