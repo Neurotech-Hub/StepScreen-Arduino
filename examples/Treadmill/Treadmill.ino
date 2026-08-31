@@ -6,7 +6,8 @@
 
   Home -- motor disabled. Shows speed (cm/s) and timeout (minutes);
           the metric being edited is drawn inverted. Info bar shows
-          date/time plus SD (mounted) or xSD (absent/unready).
+          date/time (left) and a right-justified SD label (checkmark when
+          the card is mounted).
           Back = toggle edit target (label shows "Spd" or "Time"),
           Sel = toggle direction (Fwd/Rev), OK = Run.
           Encoder adjusts the selected metric.
@@ -14,11 +15,15 @@
   Run  -- ramps the motor to the target speed, then counts down the
           timeout. Encoder adjusts speed live (smooth ramp). When the
           timeout expires the motor is disabled and DONE blinks
-          (inverted) in the countdown area.
+          (inverted) in the countdown area. Bottom line is distance (m),
+          same formula as the session log; frozen when the run ends.
           Back = stop/disable motor, return Home.
 
   Session logging (SD + RTC): each Run creates /YYYYMMDD/HHMMSS.CSV using
   FAT 8.3-safe names (day folder + time file). Full timestamp is in CSV rows.
+  Columns: datetime,event,speed,duration,distance_meters. begin is the start
+  condition (distance 0); end/cancelled is the end state. Distance is
+  final speed (cm/s) × elapsed time (speed changes mid-run are not integrated).
 
   Speed mapping: microsteps/sec = cm/s * STEPSCREEN_TREADMILL_SPS_PER_CMS
   (calibrated from belt measurement — see constant below).
@@ -27,6 +32,9 @@
   GPIO) so high belt speeds do not starve the UI loop.
 
   Board: Adafruit Feather M0 Adalogger (or compatible).
+
+  12V/TMC UART missing at boot: any Back/Sel/OK press skips the halt so
+  the UI can be used without a motor (belt will not move).
 
   Status LEDs: boot dance; off on Home; green on during Run; red blinks on DONE.
  */
@@ -110,7 +118,9 @@ int16_t speedCms = 10;   // belt speed setting
 int16_t timeoutMin = 30; // treadmill timeout
 
 RunPhase runPhase = PHASE_RUNNING;
+uint32_t runStartMs = 0;
 uint32_t runEndMs = 0;
+float loggedDistanceM = 0.0f; // frozen at end/cancel so OLED matches CSV
 uint32_t lastRampMs = 0;
 float currentSps = 0.0f; // ramped motor speed (signed microsteps/sec)
 float targetSps = 0.0f;
@@ -292,10 +302,32 @@ void updateStatusLeds() {
 
 // --- SD session logging ---
 
-void formatHomeInfoBar(char *buf, size_t len) {
-  char timePart[12];
-  rtc.formatInfoBar(timePart, sizeof(timePart));
-  snprintf(buf, len, "%s%s", timePart, sd.isReady() ? " SD" : " xSD");
+float sessionDistanceM(uint32_t atMs) {
+  return (float)speedCms * (float)(atMs - runStartMs) / 100000.0f;
+}
+
+void drawHomeSdStatus(StepScreenDisplay &d) {
+  const bool ready = sd.isReady();
+  const int16_t sdTextW = 12; // "SD" at size 1
+  const int16_t checkW = 7;
+  const int16_t gap = 2;
+  const int16_t pad = 2;
+  const int16_t groupW = (ready ? checkW + gap : 0) + sdTextW;
+  const int16_t x = STEPSCREEN_CONTENT_W - pad - groupW;
+
+  d.setTextSize(1);
+  d.setTextColor(SH110X_BLACK);
+  if (ready) {
+    d.drawLine(x, 3, x + 2, 6, SH110X_BLACK);
+    d.drawLine(x, 2, x + 2, 5, SH110X_BLACK);
+    d.drawLine(x + 2, 6, x + 6, 1, SH110X_BLACK);
+    d.drawLine(x + 2, 5, x + 6, 0, SH110X_BLACK);
+    d.setCursor(x + checkW + gap, 0);
+  } else {
+    d.setCursor(x, 0);
+  }
+  d.print(F("SD"));
+  d.setTextColor(SH110X_WHITE);
 }
 
 // FAT 8.3: /YYYYMMDD/HHMMSS.CSV (8-char dir + 6-char file + .CSV).
@@ -333,10 +365,11 @@ void startSessionLog() {
 
   char ts[24];
   rtc.formatLogTimestamp(ts, sizeof(ts));
-  char payload[80];
-  const int n = snprintf(payload, sizeof(payload),
-                         "datetime,event,speed,duration\n%s,begin,%d,%d\n", ts,
-                         sessionSpeedCms, sessionDurationMin);
+  char payload[112];
+  const int n = snprintf(
+      payload, sizeof(payload),
+      "datetime,event,speed,duration,distance_meters\n%s,begin,%d,%d,0.00\n",
+      ts, sessionSpeedCms, sessionDurationMin);
   if (n <= 0 || (size_t)n >= sizeof(payload)) {
     sessionLogPath[0] = '\0';
     return;
@@ -375,9 +408,9 @@ void finishSessionLog(const char *event) {
 
   char ts[24];
   rtc.formatLogTimestamp(ts, sizeof(ts));
-  char line[64];
-  snprintf(line, sizeof(line), "%s,%s,%d,%d", ts, event, sessionSpeedCms,
-           sessionDurationMin);
+  char line[80];
+  snprintf(line, sizeof(line), "%s,%s,%d,%d,%.2f", ts, event, speedCms,
+           sessionDurationMin, (double)loggedDistanceM);
 
   noInterrupts();
   const bool ok = sd.appendLine(sessionLogPath, line);
@@ -423,6 +456,9 @@ void updateRunSdFooter() {
 void enterHome() {
   setMotorTickActive(false);
   stepper.disable();
+  if (currentScreen == SCREEN_RUN && runPhase == PHASE_RUNNING) {
+    loggedDistanceM = sessionDistanceM(millis());
+  }
   finishSessionLog("cancelled");
   currentScreen = SCREEN_HOME;
   displayDirty = true;
@@ -439,13 +475,15 @@ void enterRun() {
 
   updateTargetSps();
   currentSps = 0.0f;
-  lastRampMs = millis();
-  runEndMs = millis() + (uint32_t)timeoutMin * 60000UL;
+  lastRampMs = runStartMs = millis();
+  runEndMs = runStartMs + (uint32_t)timeoutMin * 60000UL;
   displayDirty = true;
 
-  stepper.enable();
-  setMotorTickActive(true);
-  applyStepRate(0.0f);
+  if (motorReady) {
+    stepper.enable();
+    setMotorTickActive(true);
+    applyStepRate(0.0f);
+  }
   nav.enterScreen();
 
   Serial.print(F("[Run] "));
@@ -460,41 +498,45 @@ void enterRun() {
 // --- Run screen motor service (ramp + countdown; stepping is in ISR) ---
 
 void serviceRun() {
-  if (currentScreen != SCREEN_RUN || runPhase != PHASE_RUNNING || !motorReady) {
+  if (currentScreen != SCREEN_RUN || runPhase != PHASE_RUNNING) {
     return;
   }
 
   const uint32_t now = millis();
-  const float prevSps = currentSps;
 
-  if (currentSps != targetSps) {
-    const float step =
-        TREADMILL_ACCEL_SPS2 * (float)(now - lastRampMs) / 1000.0f;
-    if (targetSps > currentSps) {
-      currentSps = currentSps + step;
-      if (currentSps > targetSps) {
-        currentSps = targetSps;
-      }
-    } else {
-      currentSps = currentSps - step;
-      if (currentSps < targetSps) {
-        currentSps = targetSps;
+  if (motorReady) {
+    const float prevSps = currentSps;
+
+    if (currentSps != targetSps) {
+      const float step =
+          TREADMILL_ACCEL_SPS2 * (float)(now - lastRampMs) / 1000.0f;
+      if (targetSps > currentSps) {
+        currentSps = currentSps + step;
+        if (currentSps > targetSps) {
+          currentSps = targetSps;
+        }
+      } else {
+        currentSps = currentSps - step;
+        if (currentSps < targetSps) {
+          currentSps = targetSps;
+        }
       }
     }
-  }
-  lastRampMs = now;
+    lastRampMs = now;
 
-  if (currentSps != prevSps) {
-    applyStepRate(currentSps);
-  }
-  // Exact period when ramp lands on target (threshold may have skipped last tick).
-  if (currentSps == targetSps && prevSps != targetSps) {
-    applyStepRate(currentSps, true);
+    if (currentSps != prevSps) {
+      applyStepRate(currentSps);
+    }
+    // Exact period when ramp lands on target (threshold may have skipped last tick).
+    if (currentSps == targetSps && prevSps != targetSps) {
+      applyStepRate(currentSps, true);
+    }
   }
 
   if ((int32_t)(now - runEndMs) >= 0) {
     setMotorTickActive(false);
     stepper.disable();
+    loggedDistanceM = sessionDistanceM(now);
     finishSessionLog("end");
     runPhase = PHASE_DONE;
     displayDirty = true;
@@ -567,9 +609,10 @@ void drawMetric(StepScreenDisplay &d, int16_t y, const char *value,
 }
 
 void drawHome(StepScreenDisplay &d) {
-  char infoBar[16];
-  formatHomeInfoBar(infoBar, sizeof(infoBar));
+  char infoBar[12];
+  rtc.formatInfoBar(infoBar, sizeof(infoBar));
   d.drawInfoBar(infoBar);
+  drawHomeSdStatus(d);
   const StepScreenActionLabels labels = {
       editTarget == EDIT_SPEED ? "Spd" : "Time", "Dir", "Run"};
   d.drawActionColumn(labels, nav.readBack(), nav.readPush(),
@@ -625,9 +668,12 @@ void drawRun(StepScreenDisplay &d) {
     d.print(buf);
   }
 
+  const float distM = (runPhase == PHASE_DONE) ? loggedDistanceM
+                                               : sessionDistanceM(millis());
+  snprintf(buf, sizeof(buf), "%.2f m", (double)distM);
   d.setTextSize(1);
   d.setCursor(2, 56);
-  d.print(runSdFooter);
+  d.print(buf);
 }
 
 void drawScreen() {
@@ -660,19 +706,32 @@ void haltMotorDriverOffline() {
   StepScreenDisplay &d = screen.display();
   d.clearDisplay();
   d.drawInfoBar("Error");
-  d.drawActionColumn(false, false, false);
+  const StepScreenActionLabels noActions = {nullptr, nullptr, nullptr};
+  d.drawActionColumn(noActions, false, false, false);
   d.setTextSize(1);
   d.setCursor(STEPSCREEN_CONTENT_X, STEPSCREEN_CONTENT_Y + 8);
   d.println(F("Motor Driver Offline"));
   d.println();
   d.println(F("Apply 12V and Reset"));
+  d.println();
+  d.println(F("Any button to skip"));
   d.display();
 
   Serial.println(F("Motor Driver Offline"));
   Serial.println(F("Apply 12V and Reset"));
+  Serial.println(F("Any button to skip"));
 
+  StepScreenInput &in = screen.input();
   while (true) {
-    delay(250);
+    in.pollButtons();
+    if (in.readBack() || in.readConfirm() || in.readPush()) {
+      break;
+    }
+    delay(20);
+  }
+  while (in.readBack() || in.readConfirm() || in.readPush()) {
+    in.pollButtons();
+    delay(20);
   }
 }
 
@@ -696,18 +755,17 @@ void setup() {
   nav.begin(&screen.input());
 
   tmc.begin();
-  if (!tmc.verify()) {
-    haltMotorDriverOffline();
-  }
   // Pass microsteps explicitly — sketch #defines are not visible inside
   // StepScreenStepper.cpp's beginWithDriver() default argument.
-  if (!tmc.configureForStepDir(STEPSCREEN_MOTOR_MICROSTEPS,
-                               STEPSCREEN_TMC2209_RUN_CURRENT_MA)) {
+  motorReady = tmc.verify() && tmc.configureForStepDir(
+                                   STEPSCREEN_MOTOR_MICROSTEPS,
+                                   STEPSCREEN_TMC2209_RUN_CURRENT_MA);
+  if (motorReady) {
+    tmc.driver().intpol(false);
+  } else {
     haltMotorDriverOffline();
   }
-  tmc.driver().intpol(false);
   stepper.begin();
-  motorReady = true;
 
 #if defined(ARDUINO_ARCH_SAMD)
   initMotorTimer();
