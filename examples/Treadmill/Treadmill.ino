@@ -29,7 +29,9 @@
   (calibrated from belt measurement — see constant below).
 
   Stepping uses a step-scheduled TC3 ISR (one interrupt per pulse, minimal
-  GPIO) so high belt speeds do not starve the UI loop.
+  GPIO) so high belt speeds do not starve the UI loop. TC3 is 16-bit, so the
+  timer runs at 24 MHz (DIV2) to keep 1 cm/s inside the period range without
+  changing the cm/s → microsteps/sec calibration.
 
   Board: Adafruit Feather M0 Adalogger (or compatible).
 
@@ -126,35 +128,41 @@ float currentSps = 0.0f; // ramped motor speed (signed microsteps/sec)
 float targetSps = 0.0f;
 
 volatile bool motorTickActive = false;
-volatile uint32_t stepPeriodTicks = 0; // 48 MHz ticks between steps; 0 = hold
+volatile uint32_t stepPeriodTicks = 0; // timer ticks between steps; 0 = hold
 bool displayDirty = true;
 
 #if defined(ARDUINO_ARCH_SAMD)
 #define MOTOR_GCLK_HZ 48000000UL
+// TC3 is 16-bit on SAMD21 (COUNT32 is not a valid pair). DIV1 overflows at
+// 1 cm/s / 64 µsteps (87,924 ticks). DIV2 keeps that period at 43,962 and
+// leaves step rate = cm/s * STEPSCREEN_TREADMILL_SPS_PER_CMS unchanged.
+#define MOTOR_TIMER_PRESCALE 2
+#define MOTOR_TIMER_HZ (MOTOR_GCLK_HZ / MOTOR_TIMER_PRESCALE)
+#define MOTOR_PERIOD_MAX 65536u // MFRQ: CC = period - 1 fits in 16 bits
 #define STEP_PULSE_US 2 // TMC2209 STEP high time; avoid zero-width toggles
 // Ignore tiny period tweaks during ramp (avoids CC glitches mid-run).
 #define MOTOR_PERIOD_UPDATE_PCT 2u
 
 void motorTimerStop() {
-  TC3->COUNT32.CTRLA.bit.ENABLE = 0;
-  while (TC3->COUNT32.STATUS.bit.SYNCBUSY) {
+  TC3->COUNT16.CTRLA.bit.ENABLE = 0;
+  while (TC3->COUNT16.STATUS.bit.SYNCBUSY) {
   }
-  TC3->COUNT32.INTFLAG.reg = TC_INTFLAG_MC0;
+  TC3->COUNT16.INTFLAG.reg = TC_INTFLAG_MC0;
 }
 
 void motorTimerApplyPeriod(uint32_t period) {
   noInterrupts();
   motorTimerStop();
   stepPeriodTicks = period;
-  TC3->COUNT32.CC[0].reg = period - 1;
-  while (TC3->COUNT32.STATUS.bit.SYNCBUSY) {
+  TC3->COUNT16.CC[0].reg = (uint16_t)(period - 1);
+  while (TC3->COUNT16.STATUS.bit.SYNCBUSY) {
   }
-  TC3->COUNT32.COUNT.reg = 0;
-  while (TC3->COUNT32.STATUS.bit.SYNCBUSY) {
+  TC3->COUNT16.COUNT.reg = 0;
+  while (TC3->COUNT16.STATUS.bit.SYNCBUSY) {
   }
-  TC3->COUNT32.INTFLAG.reg = TC_INTFLAG_MC0;
-  TC3->COUNT32.CTRLA.bit.ENABLE = 1;
-  while (TC3->COUNT32.STATUS.bit.SYNCBUSY) {
+  TC3->COUNT16.INTFLAG.reg = TC_INTFLAG_MC0;
+  TC3->COUNT16.CTRLA.bit.ENABLE = 1;
+  while (TC3->COUNT16.STATUS.bit.SYNCBUSY) {
   }
   interrupts();
 }
@@ -165,14 +173,14 @@ void initMotorTimer() {
   while (GCLK->STATUS.bit.SYNCBUSY) {
   }
 
-  TC3->COUNT32.CTRLA.bit.ENABLE = 0;
-  while (TC3->COUNT32.STATUS.bit.SYNCBUSY) {
+  TC3->COUNT16.CTRLA.bit.ENABLE = 0;
+  while (TC3->COUNT16.STATUS.bit.SYNCBUSY) {
   }
 
-  TC3->COUNT32.CTRLA.reg = TC_CTRLA_MODE_COUNT32 | TC_CTRLA_WAVEGEN_MFRQ |
-                             TC_CTRLA_PRESCALER_DIV1;
-  TC3->COUNT32.INTENSET.reg = TC_INTENSET_MC0;
-  TC3->COUNT32.INTFLAG.reg = TC_INTFLAG_MC0;
+  TC3->COUNT16.CTRLA.reg = TC_CTRLA_MODE_COUNT16 | TC_CTRLA_WAVEGEN_MFRQ |
+                             TC_CTRLA_PRESCALER_DIV2;
+  TC3->COUNT16.INTENSET.reg = TC_INTENSET_MC0;
+  TC3->COUNT16.INTFLAG.reg = TC_INTFLAG_MC0;
   NVIC_EnableIRQ(TC3_IRQn);
 }
 
@@ -183,10 +191,10 @@ void isrStepPulse() {
 }
 
 void TC3_Handler() {
-  if (TC3->COUNT32.INTFLAG.bit.MC0 == 0) {
+  if (TC3->COUNT16.INTFLAG.bit.MC0 == 0) {
     return;
   }
-  TC3->COUNT32.INTFLAG.reg = TC_INTFLAG_MC0;
+  TC3->COUNT16.INTFLAG.reg = TC_INTFLAG_MC0;
   if (!motorTickActive || stepPeriodTicks == 0) {
     return;
   }
@@ -222,12 +230,14 @@ void applyStepRate(float sps, bool force) {
     return;
   }
 
-  uint32_t period = (uint32_t)(MOTOR_GCLK_HZ / absSps);
+  uint32_t period = (uint32_t)(MOTOR_TIMER_HZ / absSps);
   if (period < 2) {
     period = 2;
+  } else if (period > MOTOR_PERIOD_MAX) {
+    period = MOTOR_PERIOD_MAX;
   }
 
-  if (!force && stepPeriodTicks > 0 && TC3->COUNT32.CTRLA.bit.ENABLE) {
+  if (!force && stepPeriodTicks > 0 && TC3->COUNT16.CTRLA.bit.ENABLE) {
     if (period == stepPeriodTicks) {
       return;
     }
