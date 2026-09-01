@@ -32,9 +32,23 @@ void StepScreenHX711::begin() {
   configureGpio();
   power_down();
   power_up();
+  // HX711 datasheet: first conversion available ~400 ms after power-up.
+  delay(400);
   _offset = 0;
   _scale = 1.0f;
   _gain = kGain128;
+}
+
+bool StepScreenHX711::verify(uint32_t timeoutMs) {
+  const uint32_t deadline = millis() + timeoutMs;
+  while ((int32_t)(millis() - deadline) < 0) {
+    if (is_ready()) {
+      (void)read();
+      return true;
+    }
+    delay(10);
+  }
+  return false;
 }
 
 bool StepScreenHX711::is_ready() {

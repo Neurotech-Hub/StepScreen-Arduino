@@ -50,7 +50,6 @@ Install via the Arduino Library Manager:
 - AccelStepper (used by `StepScreenStepper`)
 - TMCStepper (used by `StepScreenTMC2209`)
 - RTClib (used by `StepScreenRTC`)
-- FlashStorage_SAMD (used by `StepScreenStore` / **Truss** — emulated EEPROM on SAMD21 internal flash; installed automatically as a dependency; **do not** `#include <FlashStorage_SAMD.h>` in sketches that use `StepScreenStore`)
 
 ## Pin map
 
@@ -149,12 +148,14 @@ The StepScreen board routes the HX711 to the SWD pads (PA30/PA31), silkscreened 
 
 StepScreenHX711 scale;
 scale.begin();
-scale.set_scale(420.0f);   // raw counts per gram — calibrate once
-scale.tare(10);
-float grams = scale.get_units(3);
+if (scale.verify()) {
+  scale.set_scale(420.0f);   // raw counts per gram — calibrate once
+  scale.tare(10);
+  float grams = scale.get_units(3);
+}
 ```
 
-See **LoadCellTest** for serial measure mode (200 ms) and **CAL** interactive calibration. See **Truss** for on-device calibration (flash via **FlashStorage_SAMD** + SD fallback) and closed-loop cable tension control.
+See **LoadCellTest** for serial measure mode (200 ms) and **CAL** interactive calibration. See **Truss** for on-device calibration saved to SD (`/TRUSS.CAL`) and closed-loop cable tension control.
 
 All buttons are read active LOW with internal pullups; no external resistors are needed. Swap `PIN_ENC_A`/`PIN_ENC_B` to flip the encoder's rotation sign.
 
@@ -388,7 +389,7 @@ Call `pollNavEvents()` exactly once per loop — it consumes the underlying edge
 - **LoadCellTest** -- HX711 load cell on SWCLK/SWDIO (CLK/DIO). Measure mode prints grams every 200 ms; type **CAL** for interactive tare/scale calibration over Serial.
 - **SyringePump** -- three-screen pump controller built on `StepScreenNav` + `StepScreenStepper`. Home (motor off), Adjust (encoder jogs the motor; OK cycles Low/Med/Fast speed), Run (send a signed step count over Serial at 115200 — one revolution equals `STEPSCREEN_MOTOR_STEPS_PER_REV`). Demonstrates the menu debounce pattern.
 - **Treadmill** -- rodent treadmill controller. Home shows speed (cm/s) and timeout (minutes) with the edited metric inverted (Back toggles Spd/Time, Sel toggles Fwd/Rev, encoder adjusts). Run ramps the belt to speed via `setSpeed()`/`runSpeed()`, counts down, then disables the motor and blinks DONE. Speed→steps mapping is a placeholder (`STEPSCREEN_TREADMILL_SPS_PER_CMS`).
-- **Truss** -- closed-loop cable tension controller. Home shows live load (grams) or `NO CAL`, encoder sets target load (0–500 g), Cal tares and scales against a known mass (saved to EEPROM with SD fallback), Run winds the spool with PI control to hold the target. HOLD pauses the loop and timer; overload and step-limit faults stop the motor.
+- **Truss** -- closed-loop cable tension controller. Home shows live load (grams) or `NO CAL`, encoder sets target load (0–500 g). Cal requires SD card: two-step tare + known-weight calibration saved to `/TRUSS.CAL`. Run requires stepper, load cell, SD, and valid cal; proportional-velocity control (speed scales with load error via `TRUSS_GAIN_SPS_PER_G`, capped at `TRUSS_SPS`, zero inside `TRUSS_DEADBAND_G`, EMA-filtered load) holds target load via a TC3 step ISR with a continuously ramped step rate. HOLD pauses the loop and timer; overload, step-limit, and same-direction-timeout faults stop the motor.
 
 ## API summary
 

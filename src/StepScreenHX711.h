@@ -9,6 +9,7 @@
  *
  *   StepScreenHX711 scale;
  *   scale.begin();
+ *   if (scale.verify()) { ... }
  *   scale.set_scale(420.0f);  // raw counts per gram — calibrate once
  *   scale.tare(10);
  *   float grams = scale.get_units(3);
@@ -24,6 +25,9 @@
 class StepScreenHX711 {
 public:
   void begin();
+
+  // Returns true if DOUT goes ready within timeoutMs (chip powered and wired).
+  bool verify(uint32_t timeoutMs = 1500);
 
   bool is_ready();
   float read();
