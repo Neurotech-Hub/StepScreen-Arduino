@@ -50,6 +50,7 @@ Install via the Arduino Library Manager:
 - AccelStepper (used by `StepScreenStepper`)
 - TMCStepper (used by `StepScreenTMC2209`)
 - RTClib (used by `StepScreenRTC`)
+- FlashStorage_SAMD (used by `StepScreenStore` / **Truss** — emulated EEPROM on SAMD21 internal flash; installed automatically as a dependency; **do not** `#include <FlashStorage_SAMD.h>` in sketches that use `StepScreenStore`)
 
 ## Pin map
 
@@ -80,7 +81,7 @@ Board I/O (from `StepScreenBoard.h`):
 | `PIN_SWCLK` / `PIN_SWDIO` | PA30 (30) / PA31 (31) | silkscreen SWCLK / SWDIO — HX711 SCK/DT |
 | `PIN_HX711_SCK` / `PIN_HX711_DT` | PA30 / PA31 | aliases of `PIN_SWCLK` / `PIN_SWDIO` |
 
-Optional helpers: `#include <StepScreenIO.h>` for output registry and input sampling; `#include <StepScreenIODisplay.h>` to render I/O status on the OLED; `#include <StepScreenSD.h>` for microSD mount/read/write with card-detect hot-plug; `#include <StepScreenHX711.h>` for HX711 load cell on SWD pads; `#include <StepScreenRTC.h>` for PCF8523 date/time. See the **IOTest**, **LoadCellTest**, **Treadmill**, and **SyringePump** examples.
+Optional helpers: `#include <StepScreenIO.h>` for output registry and input sampling; `#include <StepScreenIODisplay.h>` to render I/O status on the OLED; `#include <StepScreenSD.h>` for microSD mount/read/write with card-detect hot-plug; `#include <StepScreenHX711.h>` for HX711 load cell on SWD pads; `#include <StepScreenStore.h>` for small EEPROM blob persistence on SAMD21; `#include <StepScreenRTC.h>` for PCF8523 date/time. See the **IOTest**, **LoadCellTest**, **Treadmill**, **Truss**, and **SyringePump** examples.
 
 TMC2209 stepper (step/dir + half-duplex UART, from `StepScreenBoard.h`):
 
@@ -153,7 +154,7 @@ scale.tare(10);
 float grams = scale.get_units(3);
 ```
 
-See **LoadCellTest** for serial measure mode (200 ms) and **CAL** interactive calibration.
+See **LoadCellTest** for serial measure mode (200 ms) and **CAL** interactive calibration. See **Truss** for on-device calibration (flash via **FlashStorage_SAMD** + SD fallback) and closed-loop cable tension control.
 
 All buttons are read active LOW with internal pullups; no external resistors are needed. Swap `PIN_ENC_A`/`PIN_ENC_B` to flip the encoder's rotation sign.
 
@@ -387,6 +388,7 @@ Call `pollNavEvents()` exactly once per loop — it consumes the underlying edge
 - **LoadCellTest** -- HX711 load cell on SWCLK/SWDIO (CLK/DIO). Measure mode prints grams every 200 ms; type **CAL** for interactive tare/scale calibration over Serial.
 - **SyringePump** -- three-screen pump controller built on `StepScreenNav` + `StepScreenStepper`. Home (motor off), Adjust (encoder jogs the motor; OK cycles Low/Med/Fast speed), Run (send a signed step count over Serial at 115200 — one revolution equals `STEPSCREEN_MOTOR_STEPS_PER_REV`). Demonstrates the menu debounce pattern.
 - **Treadmill** -- rodent treadmill controller. Home shows speed (cm/s) and timeout (minutes) with the edited metric inverted (Back toggles Spd/Time, Sel toggles Fwd/Rev, encoder adjusts). Run ramps the belt to speed via `setSpeed()`/`runSpeed()`, counts down, then disables the motor and blinks DONE. Speed→steps mapping is a placeholder (`STEPSCREEN_TREADMILL_SPS_PER_CMS`).
+- **Truss** -- closed-loop cable tension controller. Home shows live load (grams) or `NO CAL`, encoder sets target load (0–500 g), Cal tares and scales against a known mass (saved to EEPROM with SD fallback), Run winds the spool with PI control to hold the target. HOLD pauses the loop and timer; overload and step-limit faults stop the motor.
 
 ## API summary
 

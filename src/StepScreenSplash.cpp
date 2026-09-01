@@ -163,6 +163,59 @@ static void drawTreadmill(StepScreenDisplay &d, uint8_t detail,
   }
 }
 
+// TRUSS splash: floating astronaut on a vertical tether (y=0..24)
+static const int16_t TR_AX = 64;
+
+// detail 0..255 reveals the scene; floatPhase 0..7 bobs the astronaut.
+static void drawTruss(StepScreenDisplay &d, uint8_t detail, uint8_t floatPhase) {
+  const int8_t bob = (int8_t)((floatPhase <= 4) ? floatPhase - 2 : 6 - floatPhase);
+  const int16_t ay = 13 + bob;
+  const int8_t armDrift = (floatPhase & 2) ? 1 : -1;
+
+  // Stars twinkle in the background
+  if (detail >= 50) {
+    static const int16_t kStars[][2] = {
+        {16, 3},  {38, 1},  {52, 6},  {82, 2},
+        {104, 5}, {22, 17}, {96, 18}, {72, 0},
+    };
+    for (uint8_t i = 0; i < 8; i++) {
+      if (((i + floatPhase) & 1) == 0) {
+        d.drawPixel(kStars[i][0], kStars[i][1], SH110X_WHITE);
+      }
+    }
+  }
+
+  // Vertical tether (load path goes up, weight hangs down in the real rig)
+  if (detail >= 110) {
+    const int16_t tetherTop = ay - 11;
+    if (tetherTop > 0) {
+      d.drawFastVLine(TR_AX, 0, tetherTop, SH110X_WHITE);
+      d.drawPixel(TR_AX, tetherTop / 2, SH110X_BLACK);
+    }
+  }
+
+  if (detail >= 170) {
+    // Helmet + visor
+    d.drawCircle(TR_AX, ay - 6, 5, SH110X_WHITE);
+    d.fillRect(TR_AX - 3, ay - 8, 7, 6, SH110X_WHITE);
+    d.drawRect(TR_AX - 2, ay - 6, 5, 3, SH110X_BLACK);
+    d.drawPixel(TR_AX + 1, ay - 7, SH110X_WHITE);
+
+    // Torso + chest panel
+    d.fillRect(TR_AX - 4, ay - 1, 9, 7, SH110X_WHITE);
+    d.drawRect(TR_AX - 2, ay, 5, 3, SH110X_BLACK);
+
+    // Backpack
+    d.fillRect(TR_AX + 4, ay, 2, 5, SH110X_WHITE);
+
+    // Arms and legs — spread in zero-g
+    d.drawLine(TR_AX - 4, ay + 1, TR_AX - 9, ay + 3 + armDrift, SH110X_WHITE);
+    d.drawLine(TR_AX + 4, ay + 1, TR_AX + 9, ay + 2 - armDrift, SH110X_WHITE);
+    d.drawLine(TR_AX - 2, ay + 6, TR_AX - 6, ay + 10, SH110X_WHITE);
+    d.drawLine(TR_AX + 2, ay + 6, TR_AX + 6, ay + 10, SH110X_WHITE);
+  }
+}
+
 bool StepScreenSplash::play(StepScreenDisplay &display, const char *title,
                             const char *subtitle, StepScreenInput *input) {
   StepScreenSplashConfig cfg;
@@ -202,6 +255,10 @@ bool StepScreenSplash::play(StepScreenDisplay &display,
           elapsed >= 600 ? (uint8_t)((elapsed / 60) & 7) : 0;
       const bool gait = elapsed >= 600 && ((elapsed / 120) & 1);
       drawTreadmill(display, detail, beltPhase, gait);
+    } else if (config.theme == STEPSCREEN_SPLASH_TRUSS) {
+      const uint8_t floatPhase =
+          elapsed >= 600 ? (uint8_t)((elapsed / 90) & 7) : 0;
+      drawTruss(display, detail, floatPhase);
     } else {
       // Plunger depression: ease-out over 500-1400 ms, then hold
       int16_t plunger = 0;

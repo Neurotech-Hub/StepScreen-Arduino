@@ -9,6 +9,8 @@
  *     fluid empties, droplets exit the needle)
  *   - TREADMILL: a side-view treadmill with a rodent running on the
  *     belt (scrolling belt dashes, two-phase leg gait)
+ *   - TRUSS: a floating astronaut on a vertical tether, gently bobbing
+ *     among twinkling stars
  *
  *   #include <StepScreenSplash.h>
  *
@@ -28,6 +30,7 @@ class StepScreenInput;
 enum StepScreenSplashTheme : uint8_t {
   STEPSCREEN_SPLASH_SYRINGE = 0,
   STEPSCREEN_SPLASH_TREADMILL = 1,
+  STEPSCREEN_SPLASH_TRUSS = 2,
 };
 
 struct StepScreenSplashConfig {
