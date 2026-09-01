@@ -20,11 +20,11 @@
   error (TRUSS_GAIN_SPS_PER_G, capped at TRUSS_SPS), so the spool runs fast
   when far from target and decelerates as the load approaches it. The accel
   ramp (TRUSS_ACCEL_SPS2) advances every TRUSS_RAMP_MS from loop(), while
-  the error is re-evaluated at the HX711 rate (TRUSS_LOOP_MS).
+  the error is re-evaluated on each new HX711 sample (typically ~10 Hz).
 
   Control tuning (sketch #defines below):
     TRUSS_SPS, TRUSS_GAIN_SPS_PER_G, TRUSS_DEADBAND_G, TRUSS_ACCEL_SPS2,
-    TRUSS_RAMP_MS, TRUSS_FILTER_ALPHA, TRUSS_LOOP_MS (~HX711 rate),
+    TRUSS_RAMP_MS, TRUSS_FILTER_ALPHA,
     TRUSS_WIND_SIGN (+1 if winding increases load),
     TRUSS_DIR_TIMEOUT_MS (continuous same-direction limit -> fault),
     TRUSS_OVERLOAD_G, TRUSS_MAX_STEPS_SESSION
@@ -64,7 +64,7 @@
 #endif
 
 #ifndef TRUSS_DEADBAND_G
-#define TRUSS_DEADBAND_G 12.0f
+#define TRUSS_DEADBAND_G 6.0f
 #endif
 
 #ifndef TRUSS_ACCEL_SPS2
@@ -82,14 +82,9 @@
 #define TRUSS_DEBUG_MS 200
 #endif
 
-// EMA smoothing on load samples (0-1; 1 = raw). Reduces noise-driven
-// direction flapping near the target.
+// EMA smoothing on load samples (0-1; 1 = raw). Lower values add lag.
 #ifndef TRUSS_FILTER_ALPHA
-#define TRUSS_FILTER_ALPHA 0.4f
-#endif
-
-#ifndef TRUSS_LOOP_MS
-#define TRUSS_LOOP_MS 100
+#define TRUSS_FILTER_ALPHA 0.75f
 #endif
 
 #ifndef TRUSS_WIND_SIGN
@@ -204,7 +199,7 @@ uint32_t tensionStateSinceMs = 0;
 float targetSpsCmd = 0.0f; // set by control loop, chased by the ramp
 float currentSps = 0.0f;   // ramped speed actually applied to the timer
 bool loadFilterSeeded = false;
-uint32_t lastControlMs = 0;
+bool loadSampleFresh = false;
 uint32_t lastRampMs = 0;
 volatile uint32_t sessionStepCount = 0;
 
@@ -614,6 +609,7 @@ void readLiveLoad() {
   } else {
     liveGrams += TRUSS_FILTER_ALPHA * (raw - liveGrams);
   }
+  loadSampleFresh = true;
   if (!loadCellReady) {
     loadCellReady = true;
     displayDirty = true;
@@ -715,7 +711,7 @@ void enterRun() {
   tensionStateSinceMs = millis();
   targetSpsCmd = 0.0f;
   currentSps = 0.0f;
-  lastControlMs = 0;
+  loadSampleFresh = false;
   lastRampMs = millis();
   sessionElapsedMs = 0;
   sessionTickMs = millis();
@@ -761,11 +757,6 @@ void serviceRun() {
   }
   sessionTickMs = now;
 
-  if (now - lastControlMs < TRUSS_LOOP_MS) {
-    return;
-  }
-  lastControlMs = now;
-
   if (runPhase == PHASE_FAULT) {
     return;
   }
@@ -786,6 +777,13 @@ void serviceRun() {
     targetSpsCmd = 0.0f; // ramp decelerates to a stop
     return;
   }
+
+  // Recompute motor command on each new load sample — do not add an extra
+  // fixed delay on top of the HX711 conversion time (~100 ms at 10 Hz).
+  if (!loadSampleFresh) {
+    return;
+  }
+  loadSampleFresh = false;
 
   if (!motorReady) {
     return;
