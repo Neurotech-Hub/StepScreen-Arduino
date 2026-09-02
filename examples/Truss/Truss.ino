@@ -33,6 +33,13 @@
   OLED cannot starve the motor. Load samples are non-blocking (one conversion
   when DOUT is ready).
 
+  Session logging (SD + RTC): each Run creates /YYYYMMDD/HHMMSS.CSV (same
+  FAT 8.3 layout as Treadmill). Columns: datetime,event,target_load_g,
+  actual_load_g. Events: begin, measure (~1 Hz), end, fault. Samples buffer
+  for ~2 minutes in RAM; a full buffer briefly holds the motor (enabled,
+  zero speed — not released) while flushing, then closed-loop resumes.
+  Remaining rows flush when the session ends.
+
   Board: Adafruit Feather M0 Adalogger (or compatible SAMD21).
 
   Calibration is saved to /TRUSS.CAL on the microSD card (required for Cal).
@@ -51,62 +58,81 @@
 #endif
 
 // --- Control tuning ---
-// Maximum wind/unwind speed (steps/s), used when far from target.
+// Top speed when the load is far from target (steps per second). Raise for
+// faster spool-up; lower if the cable jerks hard when taking up slack.
 #ifndef TRUSS_SPS
 #define TRUSS_SPS 2000.0f
 #endif
 
-// Proportional gain: commanded speed = gain * (|error| - deadband), capped
-// at TRUSS_SPS. The motor decelerates as the load approaches target instead
-// of slamming across the deadband at full speed (which caused hunting).
+// How strongly the motor reacts to each gram of error. Higher = snappier
+// and more likely to overshoot; lower = gentler and slower to settle.
 #ifndef TRUSS_GAIN_SPS_PER_G
 #define TRUSS_GAIN_SPS_PER_G 40.0f
 #endif
 
+// "Close enough" band in grams. Inside this band the motor stops. Raise if
+// it fidgets near target; lower if you need a tighter hold.
 #ifndef TRUSS_DEADBAND_G
 #define TRUSS_DEADBAND_G 6.0f
 #endif
 
+// How quickly speed can change (steps/s^2). Raise for punchier starts/stops;
+// lower if the spool sounds rough when speeding up or reversing.
 #ifndef TRUSS_ACCEL_SPS2
 #define TRUSS_ACCEL_SPS2 8000.0f
 #endif
 
-// How often the speed ramp advances (ms). Runs from loop(), independent of
-// the 10 Hz load-cell control update, so acceleration is smooth.
+// How often the speed ramp updates (ms). Smaller = smoother accel; leave
+// alone unless you are debugging motor feel.
 #ifndef TRUSS_RAMP_MS
 #define TRUSS_RAMP_MS 5
 #endif
 
-// Serial telemetry interval while on the Run screen (ms); 0 disables.
+// How often Run prints a status line on Serial (ms). Set to 0 to turn off.
 #ifndef TRUSS_DEBUG_MS
 #define TRUSS_DEBUG_MS 200
 #endif
 
-// EMA smoothing on load samples (0-1; 1 = raw). Lower values add lag.
+// Load-cell smoothing (0–1). 1.0 = use each reading as-is (fastest, noisier).
+// Lower = more filtering (calmer, but slower to notice a real load change).
 #ifndef TRUSS_FILTER_ALPHA
 #define TRUSS_FILTER_ALPHA 0.75f
 #endif
 
+// Flip wind/unwind if the spool moves the wrong way (+1 or -1).
 #ifndef TRUSS_WIND_SIGN
 #define TRUSS_WIND_SIGN -1
 #endif
 
-// Fault if the motor runs continuously in one direction this long without
-// reaching the deadband (slack cable, wrong TRUSS_WIND_SIGN, or bad cal).
+// Stop and fault if the motor keeps going one way this long without reaching
+// target (slack cable, wrong TRUSS_WIND_SIGN, or bad calibration).
 #ifndef TRUSS_DIR_TIMEOUT_MS
 #define TRUSS_DIR_TIMEOUT_MS 5000
 #endif
 
+// Hard stop if live load exceeds this (grams).
 #ifndef TRUSS_OVERLOAD_G
 #define TRUSS_OVERLOAD_G 600.0f
 #endif
 
+// Hard stop if the motor takes more than this many steps in one Run session.
 #ifndef TRUSS_MAX_STEPS_SESSION
 #define TRUSS_MAX_STEPS_SESSION 200000L
 #endif
 
+// How many HX711 samples to average when taring / calibrating.
 #ifndef TRUSS_CAL_SAMPLES
 #define TRUSS_CAL_SAMPLES 20
+#endif
+
+// Session log: one "measure" row this often (ms). Requires SD + RTC.
+#ifndef TRUSS_LOG_MS
+#define TRUSS_LOG_MS 1000
+#endif
+
+// RAM buffer depth (~2 min at 1 Hz). Full buffer -> hold motor, flush, resume.
+#ifndef TRUSS_LOG_BUFFER
+#define TRUSS_LOG_BUFFER 120
 #endif
 
 #define TARGET_MIN_G 0
@@ -130,6 +156,7 @@
 #include <StepScreenStepper.h>
 #include <StepScreenTMC2209.h>
 
+#include <RTClib.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -314,6 +341,20 @@ void setMotorTickActive(bool active) {
 uint32_t sessionElapsedMs = 0;
 uint32_t sessionTickMs = 0;
 
+// Session CSV logging (Treadmill-style path; buffered measure rows)
+char sessionLogPath[24] = {};
+uint32_t logSessionStartMs = 0;
+DateTime logSessionStartDt;
+struct TrussLogSample {
+  uint32_t ms;
+  int16_t targetG;
+  float actualG;
+};
+TrussLogSample logBuffer[TRUSS_LOG_BUFFER];
+uint16_t logCount = 0;
+uint32_t lastLogMs = 0;
+bool logFlushActive = false;
+
 void drawHomeSdStatus(StepScreenDisplay &d);
 void drawHomeHardwareFooter(StepScreenDisplay &d);
 void drawLargeGrams(StepScreenDisplay &d, int16_t y, float grams,
@@ -327,10 +368,18 @@ void enterRun();
 void serviceRun();
 void serviceMotorRamp();
 void serviceRunDebug();
+void serviceSessionLog();
 void serviceCal();
 void updateLoadCellDetect();
 void updateSdStatus();
 void readLiveLoad();
+bool formatSessionPath(char *filePath, size_t fileLen, char *dirPath,
+                       size_t dirLen);
+void formatSampleTimestamp(char *buf, size_t len, uint32_t sampleMs);
+void holdMotorForLogFlush();
+bool flushLogBuffer();
+void startSessionLog();
+void finishSessionLog(const char *event);
 
 bool calAllowed() { return loadCellReady && sdReady; }
 
@@ -657,7 +706,221 @@ bool waitForSdReady(uint32_t timeoutMs) {
   return sd.isReady();
 }
 
+// FAT 8.3: /YYYYMMDD/HHMMSS.CSV (same layout as Treadmill).
+bool formatSessionPath(char *filePath, size_t fileLen, char *dirPath,
+                       size_t dirLen) {
+  char ts[24];
+  rtc.formatLogTimestamp(ts, sizeof(ts));
+  if (ts[0] == '\0') {
+    filePath[0] = '\0';
+    return false;
+  }
+  unsigned y, mo, d, h, mi, s;
+  if (sscanf(ts, "%u-%u-%u %u:%u:%u", &y, &mo, &d, &h, &mi, &s) != 6) {
+    filePath[0] = '\0';
+    return false;
+  }
+  snprintf(dirPath, dirLen, "/%04u%02u%02u", y, mo, d);
+  snprintf(filePath, fileLen, "%s/%02u%02u%02u.CSV", dirPath, h, mi, s);
+  return true;
+}
+
+void formatSampleTimestamp(char *buf, size_t len, uint32_t sampleMs) {
+  if (buf == nullptr || len == 0) {
+    return;
+  }
+  const uint32_t elapsedSec = (sampleMs - logSessionStartMs) / 1000UL;
+  const DateTime at = logSessionStartDt + TimeSpan((int32_t)elapsedSec);
+  snprintf(buf, len, "%04u-%02u-%02u %02u:%02u:%02u", at.year(), at.month(),
+           at.day(), at.hour(), at.minute(), at.second());
+}
+
+void holdMotorForLogFlush() {
+  // Hold tension: stop pulses but keep the driver enabled (not released).
+  targetSpsCmd = 0.0f;
+  currentSps = 0.0f;
+  applyStepRate(0.0f, true);
+}
+
+bool flushLogBuffer() {
+  if (sessionLogPath[0] == '\0' || logCount == 0) {
+    return true;
+  }
+  if (!sd.isReady()) {
+    Serial.println(F("[Log] flush skipped (SD not ready)"));
+    logCount = 0;
+    return false;
+  }
+
+  const bool shouldHold =
+      motorReady && currentScreen == SCREEN_RUN && runPhase != PHASE_FAULT &&
+      stepper.isEnabled();
+
+  logFlushActive = true;
+  if (shouldHold) {
+    holdMotorForLogFlush();
+  }
+
+  bool ok = true;
+  for (uint16_t i = 0; i < logCount; i++) {
+    char ts[24];
+    formatSampleTimestamp(ts, sizeof(ts), logBuffer[i].ms);
+    char line[72];
+    snprintf(line, sizeof(line), "%s,measure,%d,%.1f", ts, logBuffer[i].targetG,
+             (double)logBuffer[i].actualG);
+    if (!sd.appendLine(sessionLogPath, line)) {
+      ok = false;
+      Serial.print(F("[Log] measure flush failed: "));
+      Serial.println(sd.lastError());
+      break;
+    }
+  }
+  logCount = 0;
+
+  logFlushActive = false;
+  lastRampMs = millis();
+  return ok;
+}
+
+void startSessionLog() {
+  sessionLogPath[0] = '\0';
+  logCount = 0;
+  lastLogMs = 0;
+
+  if (!sd.isReady() || !rtc.isReady()) {
+    Serial.println(F("[Log] skipped (need SD + RTC)"));
+    return;
+  }
+
+  char dirPath[12];
+  if (!formatSessionPath(sessionLogPath, sizeof(sessionLogPath), dirPath,
+                         sizeof(dirPath))) {
+    Serial.println(F("[Log] begin failed (RTC timestamp)"));
+    return;
+  }
+
+  char ts[24];
+  rtc.formatLogTimestamp(ts, sizeof(ts));
+  unsigned y, mo, d, h, mi, s;
+  if (sscanf(ts, "%u-%u-%u %u:%u:%u", &y, &mo, &d, &h, &mi, &s) != 6) {
+    sessionLogPath[0] = '\0';
+    return;
+  }
+  logSessionStartDt = DateTime((uint16_t)y, (uint8_t)mo, (uint8_t)d, (uint8_t)h,
+                               (uint8_t)mi, (uint8_t)s);
+  logSessionStartMs = millis();
+
+  char payload[128];
+  const int n = snprintf(
+      payload, sizeof(payload),
+      "datetime,event,target_load_g,actual_load_g\n%s,begin,%d,%.1f\n", ts,
+      targetGrams, (double)liveGrams);
+  if (n <= 0 || (size_t)n >= sizeof(payload)) {
+    sessionLogPath[0] = '\0';
+    return;
+  }
+
+  bool ok = sd.ensureDirectory(dirPath);
+  if (ok) {
+    ok = sd.writeFile(sessionLogPath, (const uint8_t *)payload, (size_t)n,
+                      false);
+  }
+
+  if (!ok) {
+    Serial.print(F("[Log] begin failed ("));
+    Serial.print(sessionLogPath);
+    Serial.print(F("): "));
+    Serial.println(sd.lastError());
+    sessionLogPath[0] = '\0';
+    return;
+  }
+
+  lastLogMs = logSessionStartMs;
+  Serial.print(F("[Log] begin "));
+  Serial.println(sessionLogPath);
+}
+
+void finishSessionLog(const char *event) {
+  if (sessionLogPath[0] == '\0') {
+    return;
+  }
+
+  (void)flushLogBuffer();
+
+  if (!sd.isReady()) {
+    sessionLogPath[0] = '\0';
+    return;
+  }
+
+  char ts[24];
+  rtc.formatLogTimestamp(ts, sizeof(ts));
+  if (ts[0] == '\0') {
+    formatSampleTimestamp(ts, sizeof(ts), millis());
+  }
+
+  char line[72];
+  snprintf(line, sizeof(line), "%s,%s,%d,%.1f", ts, event, targetGrams,
+           (double)liveGrams);
+
+  const bool shouldHold =
+      motorReady && currentScreen == SCREEN_RUN && runPhase != PHASE_FAULT &&
+      stepper.isEnabled();
+  logFlushActive = true;
+  if (shouldHold) {
+    holdMotorForLogFlush();
+  }
+  const bool ok = sd.appendLine(sessionLogPath, line);
+  logFlushActive = false;
+
+  if (!ok) {
+    Serial.print(F("[Log] "));
+    Serial.print(event);
+    Serial.print(F(" failed: "));
+    Serial.println(sd.lastError());
+  } else {
+    Serial.print(F("[Log] "));
+    Serial.println(event);
+  }
+
+  sessionLogPath[0] = '\0';
+  logCount = 0;
+}
+
+void serviceSessionLog() {
+  if (currentScreen != SCREEN_RUN || sessionLogPath[0] == '\0' ||
+      logFlushActive || runPhase == PHASE_FAULT) {
+    return;
+  }
+
+  const uint32_t now = millis();
+  if (lastLogMs != 0 && now - lastLogMs < (uint32_t)TRUSS_LOG_MS) {
+    return;
+  }
+  lastLogMs = now;
+
+  if (logCount >= TRUSS_LOG_BUFFER) {
+    (void)flushLogBuffer();
+  }
+
+  if (logCount >= TRUSS_LOG_BUFFER) {
+    return;
+  }
+
+  logBuffer[logCount].ms = now;
+  logBuffer[logCount].targetG = targetGrams;
+  logBuffer[logCount].actualG = liveGrams;
+  logCount++;
+
+  if (logCount >= TRUSS_LOG_BUFFER) {
+    (void)flushLogBuffer();
+  }
+}
+
 void enterHome() {
+  if (currentScreen == SCREEN_RUN && runPhase != PHASE_FAULT) {
+    finishSessionLog("end");
+  }
+
   setMotorTickActive(false);
   applyStepRate(0.0f);
   stepper.disable();
@@ -705,6 +968,9 @@ void enterRun() {
     return;
   }
 
+  // SD before motor timer — keep SPI free of step ISR contention.
+  startSessionLog();
+
   currentScreen = SCREEN_RUN;
   runPhase = PHASE_RUNNING;
   tensionState = TENSION_IDLE;
@@ -734,9 +1000,13 @@ void enterRun() {
 }
 
 void tripFault(const char *reason) {
-  setMotorTickActive(false);
+  // Hold, flush log as fault, then release the driver.
   targetSpsCmd = 0.0f;
   currentSps = 0.0f;
+  applyStepRate(0.0f, true);
+  finishSessionLog("fault");
+
+  setMotorTickActive(false);
   applyStepRate(0.0f);
   stepper.disable();
   runPhase = PHASE_FAULT;
@@ -757,7 +1027,7 @@ void serviceRun() {
   }
   sessionTickMs = now;
 
-  if (runPhase == PHASE_FAULT) {
+  if (runPhase == PHASE_FAULT || logFlushActive) {
     return;
   }
 
@@ -878,7 +1148,8 @@ void serviceRunDebug() {
 // speed changes in small, frequent increments (smooth), independent of the
 // 10 Hz load-cell control update.
 void serviceMotorRamp() {
-  if (currentScreen != SCREEN_RUN || !motorReady || runPhase == PHASE_FAULT) {
+  if (currentScreen != SCREEN_RUN || !motorReady || runPhase == PHASE_FAULT ||
+      logFlushActive) {
     return;
   }
 
@@ -1276,6 +1547,7 @@ void loop() {
 
   serviceRun();
   serviceMotorRamp();
+  serviceSessionLog();
   serviceRunDebug();
   serviceCal();
 
