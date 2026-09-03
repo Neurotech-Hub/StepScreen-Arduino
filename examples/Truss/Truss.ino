@@ -11,19 +11,28 @@
     HX711 VCC -> 3.3V, GND -> GND
     TMC2209 step/dir as on the StepScreen board
 
+  HX711 sample rate:
+    Many off-the-shelf modules ship with RATE soldered for 10 Hz (~100 ms
+    per sample). That is too slow for this closed loop and causes overshoot.
+    Prefer 80 Hz: move the RATE jumper/solder blob from the 10 Hz pad to
+    the 80 Hz pad (RATE high / tied toward VCC; 10 Hz is RATE low / GND).
+    After that change, a new conversion is ready about every 12.5 ms.
+
   Calibration (Cal screen):
     1. Remove weight; RUN tares (0g TARE step).
     2. Hang a known mass; set grams with encoder (50-500); RUN calibrates.
     3. SAVED flashes, then step 1 repeats. BACK returns Home.
 
-  Control: proportional velocity with a deadband. Speed scales with load
-  error (TRUSS_GAIN_SPS_PER_G, capped at TRUSS_SPS), so the spool runs fast
-  when far from target and decelerates as the load approaches it. The accel
-  ramp (TRUSS_ACCEL_SPS2) advances every TRUSS_RAMP_MS from loop(), while
-  the error is re-evaluated on each new HX711 sample (typically ~10 Hz).
+  Control: hysteresis + near-target nudge. Stop when |error| < TRUSS_STOP_G;
+  do not start again until |error| > TRUSS_START_G. Inside TRUSS_NUDGE_G,
+  each HX711 sample issues TRUSS_NUDGE_STEPS then waits. Between that and
+  TRUSS_APPROACH_G, creep at TRUSS_APPROACH_SPS. Farther out, speed is
+  proportional (TRUSS_GAIN_SPS_PER_G, capped at TRUSS_SPS).
 
   Control tuning (sketch #defines below):
-    TRUSS_SPS, TRUSS_GAIN_SPS_PER_G, TRUSS_DEADBAND_G, TRUSS_ACCEL_SPS2,
+    TRUSS_SPS, TRUSS_GAIN_SPS_PER_G, TRUSS_STOP_G, TRUSS_START_G,
+    TRUSS_APPROACH_G, TRUSS_APPROACH_SPS, TRUSS_NUDGE_G, TRUSS_NUDGE_STEPS,
+    TRUSS_ACCEL_SPS2,
     TRUSS_RAMP_MS, TRUSS_FILTER_ALPHA,
     TRUSS_WIND_SIGN (+1 if winding increases load),
     TRUSS_DIR_TIMEOUT_MS (continuous same-direction limit -> fault),
@@ -67,13 +76,39 @@
 // How strongly the motor reacts to each gram of error. Higher = snappier
 // and more likely to overshoot; lower = gentler and slower to settle.
 #ifndef TRUSS_GAIN_SPS_PER_G
-#define TRUSS_GAIN_SPS_PER_G 25.0f
+#define TRUSS_GAIN_SPS_PER_G 8.0f
 #endif
 
-// "Close enough" band in grams. Inside this band the motor stops. Raise if
-// it fidgets near target; lower if you need a tighter hold.
-#ifndef TRUSS_DEADBAND_G
-#define TRUSS_DEADBAND_G 10.0f
+// Inner band: stop when |error| is inside this (grams). This is how close
+// we try to match the target.
+#ifndef TRUSS_STOP_G
+#define TRUSS_STOP_G 4.0f
+#endif
+
+// Outer band: after a stop, do not start again until |error| exceeds this.
+// Keeps HX711 noise from chattering around the inner band.
+#ifndef TRUSS_START_G
+#define TRUSS_START_G 8.0f
+#endif
+
+// Mid band: continuous creep at TRUSS_APPROACH_SPS when |error| is below
+// this but still above the nudge window (recover after a lift/drop without
+// blasting through the stop band).
+#ifndef TRUSS_APPROACH_G
+#define TRUSS_APPROACH_G 40.0f
+#endif
+
+#ifndef TRUSS_APPROACH_SPS
+#define TRUSS_APPROACH_SPS 50.0f
+#endif
+
+// Very near target: a few steps per HX711 sample, then wait (stiff cable).
+#ifndef TRUSS_NUDGE_G
+#define TRUSS_NUDGE_G 12.0f
+#endif
+
+#ifndef TRUSS_NUDGE_STEPS
+#define TRUSS_NUDGE_STEPS 3
 #endif
 
 // How quickly speed can change (steps/s^2). Raise for punchier starts/stops;
@@ -104,15 +139,17 @@
 #define TRUSS_WIND_SIGN -1
 #endif
 
-// Stop and fault if the motor keeps going one way this long without reaching
-// target (slack cable, wrong TRUSS_WIND_SIGN, or bad calibration).
+// Stop and fault if the motor keeps going one way this long FAR from
+// target without progress (slack cable, wrong TRUSS_WIND_SIGN, bad cal).
+// Near target (nudge / approach) the timeout does not apply — recovery
+// after an animal lift can take longer than this.
 #ifndef TRUSS_DIR_TIMEOUT_MS
 #define TRUSS_DIR_TIMEOUT_MS 5000
 #endif
 
 // Hard stop if live load exceeds this (grams).
 #ifndef TRUSS_OVERLOAD_G
-#define TRUSS_OVERLOAD_G 600.0f
+#define TRUSS_OVERLOAD_G 800.0f
 #endif
 
 // Hard stop if the motor takes more than this many steps in one Run session.
@@ -223,6 +260,7 @@ enum TensionState : uint8_t {
 };
 TensionState tensionState = TENSION_IDLE;
 uint32_t tensionStateSinceMs = 0;
+float lastAbsErrForTimeout = 0.0f;
 float targetSpsCmd = 0.0f; // set by control loop, chased by the ramp
 float currentSps = 0.0f;   // ramped speed actually applied to the timer
 bool loadFilterSeeded = false;
@@ -384,6 +422,25 @@ void finishSessionLog(const char *event);
 bool calAllowed() { return loadCellReady && sdReady; }
 
 bool runAllowed() { return motorReady && loadCellReady && sdReady; }
+
+// A few STEP pulses, then stop. Used near target so one HX711 sample cannot
+// wind far enough to overshoot. DIR follows the same sign as applyStepRate.
+void nudgeSteps(int8_t sign) {
+  applyStepRate(0.0f, true);
+  targetSpsCmd = 0.0f;
+  currentSps = 0.0f;
+
+  digitalWrite(PIN_MOTOR_DIR, (sign >= 0) ? HIGH : LOW);
+  delayMicroseconds(5);
+
+  for (uint8_t i = 0; i < (uint8_t)TRUSS_NUDGE_STEPS; i++) {
+    digitalWrite(PIN_MOTOR_STEP, HIGH);
+    delayMicroseconds(2);
+    digitalWrite(PIN_MOTOR_STEP, LOW);
+    delayMicroseconds(2);
+    sessionStepCount++;
+  }
+}
 
 void applyStepRate(float sps, bool force) {
   if (!motorReady || runPhase == PHASE_FAULT) {
@@ -975,6 +1032,7 @@ void enterRun() {
   runPhase = PHASE_RUNNING;
   tensionState = TENSION_IDLE;
   tensionStateSinceMs = millis();
+  lastAbsErrForTimeout = 0.0f;
   targetSpsCmd = 0.0f;
   currentSps = 0.0f;
   loadSampleFresh = false;
@@ -1048,8 +1106,7 @@ void serviceRun() {
     return;
   }
 
-  // Recompute motor command on each new load sample — do not add an extra
-  // fixed delay on top of the HX711 conversion time (~100 ms at 10 Hz).
+  // Recompute motor command on each new load sample.
   if (!loadSampleFresh) {
     return;
   }
@@ -1059,43 +1116,60 @@ void serviceRun() {
     return;
   }
 
-  // Proportional velocity: speed scales with how far the load is from
-  // target (beyond the deadband), capped at TRUSS_SPS. Far below target
-  // (e.g. weight resting on the ground) the spool winds at full speed;
-  // as tension builds toward target it slows smoothly to a stop instead
-  // of overshooting and hunting across the band.
   const float error = (float)targetGrams - liveGrams;
-  float sps = 0.0f;
-  const float mag = fabsf(error) - TRUSS_DEADBAND_G;
-  if (mag > 0.0f) {
-    sps = TRUSS_GAIN_SPS_PER_G * mag;
-    if (sps > TRUSS_SPS) {
-      sps = TRUSS_SPS;
+  const float absErr = fabsf(error);
+
+  // Hysteresis: stop inside the inner band; stay idle until the outer band.
+  if (tensionState == TENSION_IDLE) {
+    if (absErr <= TRUSS_START_G) {
+      targetSpsCmd = 0.0f;
+      return;
     }
-    if (error < 0.0f) {
-      sps = -sps;
-    }
+  } else if (absErr < TRUSS_STOP_G) {
+    tensionState = TENSION_IDLE;
+    tensionStateSinceMs = now;
+    targetSpsCmd = 0.0f;
+    applyStepRate(0.0f, true);
+    currentSps = 0.0f;
+    return;
   }
 
-  TensionState desired = TENSION_IDLE;
-  if (sps > 0.0f) {
-    desired = TENSION_WIND;
-  } else if (sps < 0.0f) {
-    desired = TENSION_UNWIND;
-  }
-
+  TensionState desired = (error > 0.0f) ? TENSION_WIND : TENSION_UNWIND;
   if (desired != tensionState) {
     tensionState = desired;
     tensionStateSinceMs = now;
-  } else if (tensionState != TENSION_IDLE &&
+    lastAbsErrForTimeout = absErr;
+  } else if (absErr + 1.0f < lastAbsErrForTimeout) {
+    // Closing on the target — keep the direction-timeout clock fresh.
+    tensionStateSinceMs = now;
+    lastAbsErrForTimeout = absErr;
+  } else if (absErr >= TRUSS_APPROACH_G &&
              now - tensionStateSinceMs > (uint32_t)TRUSS_DIR_TIMEOUT_MS) {
-    // Same direction too long without reaching the target: slack cable,
-    // wrong TRUSS_WIND_SIGN, or bad calibration (AutoG2 FORCE_MOTOR_STOP_MS).
+    // Only when far from target and not making progress (slack / wrong sign).
     tripFault("direction timeout");
     return;
   }
 
-  targetSpsCmd = sps * (float)TRUSS_WIND_SIGN;
+  const int8_t windSign = (int8_t)TRUSS_WIND_SIGN;
+  const int8_t dirSign = (error > 0.0f) ? windSign : (int8_t)(-windSign);
+
+  // Very near target: a few steps per sample, then wait for the next reading.
+  if (absErr < TRUSS_NUDGE_G) {
+    nudgeSteps(dirSign);
+    return;
+  }
+
+  // Mid band: continuous creep (faster recovery after a lift/drop than nudges).
+  if (absErr < TRUSS_APPROACH_G) {
+    targetSpsCmd = TRUSS_APPROACH_SPS * (float)dirSign;
+    return;
+  }
+
+  float sps = TRUSS_GAIN_SPS_PER_G * absErr;
+  if (sps > TRUSS_SPS) {
+    sps = TRUSS_SPS;
+  }
+  targetSpsCmd = sps * (float)dirSign;
 }
 
 // Serial telemetry: one line every TRUSS_DEBUG_MS while on the Run screen.
