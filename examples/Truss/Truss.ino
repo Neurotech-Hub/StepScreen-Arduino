@@ -67,19 +67,19 @@
 // How strongly the motor reacts to each gram of error. Higher = snappier
 // and more likely to overshoot; lower = gentler and slower to settle.
 #ifndef TRUSS_GAIN_SPS_PER_G
-#define TRUSS_GAIN_SPS_PER_G 40.0f
+#define TRUSS_GAIN_SPS_PER_G 25.0f
 #endif
 
 // "Close enough" band in grams. Inside this band the motor stops. Raise if
 // it fidgets near target; lower if you need a tighter hold.
 #ifndef TRUSS_DEADBAND_G
-#define TRUSS_DEADBAND_G 6.0f
+#define TRUSS_DEADBAND_G 10.0f
 #endif
 
 // How quickly speed can change (steps/s^2). Raise for punchier starts/stops;
 // lower if the spool sounds rough when speeding up or reversing.
 #ifndef TRUSS_ACCEL_SPS2
-#define TRUSS_ACCEL_SPS2 8000.0f
+#define TRUSS_ACCEL_SPS2 4000.0f
 #endif
 
 // How often the speed ramp updates (ms). Smaller = smoother accel; leave
