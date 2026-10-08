@@ -33,7 +33,10 @@ public:
   bool isReady() const { return _ready; }
 
   // Sets time from firmware build stamp when RTC is unset or stale.
-  bool syncFromBuildTimeIfNeeded();
+  // The defaults expand in the calling sketch, which is recompiled on every
+  // upload; library objects are cached, so __DATE__/__TIME__ there go stale.
+  bool syncFromBuildTimeIfNeeded(const char *buildDate = __DATE__,
+                                 const char *buildTime = __TIME__);
 
   // "MM-DD HH:MM" or "-- --:--" when not ready.
   void formatInfoBar(char *buf, size_t len) const;

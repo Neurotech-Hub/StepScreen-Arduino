@@ -7,8 +7,6 @@ namespace {
 
 RTC_PCF8523 rtc;
 
-DateTime buildDateTime() { return DateTime(F(__DATE__), F(__TIME__)); }
-
 void printDateTime(const DateTime &dt) {
   char buf[] = "YYYY-MM-DD hh:mm:ss";
   dt.toString(buf);
@@ -22,12 +20,13 @@ bool StepScreenRTC::begin(TwoWire *wire) {
   return _ready;
 }
 
-bool StepScreenRTC::syncFromBuildTimeIfNeeded() {
-  if (!_ready) {
+bool StepScreenRTC::syncFromBuildTimeIfNeeded(const char *buildDate,
+                                              const char *buildTimeStr) {
+  if (!_ready || buildDate == nullptr || buildTimeStr == nullptr) {
     return false;
   }
 
-  const DateTime buildTime = buildDateTime();
+  const DateTime buildTime(buildDate, buildTimeStr);
   const DateTime now = rtc.now();
   const bool needsSync = !rtc.initialized() || rtc.lostPower() ||
                          now.year() < 2020 ||

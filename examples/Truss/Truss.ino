@@ -36,7 +36,7 @@
     TRUSS_RAMP_MS, TRUSS_FILTER_ALPHA,
     TRUSS_WIND_SIGN (+1 if winding increases load),
     TRUSS_DIR_TIMEOUT_MS (continuous same-direction limit -> fault),
-    TRUSS_OVERLOAD_G, TRUSS_MAX_STEPS_SESSION
+    TRUSS_OVERLOAD_G, TRUSS_MAX_STEPS_UNSETTLED
 
   Stepping uses a TC3 ISR (one interrupt per pulse) so HX711 reads and the
   OLED cannot starve the motor. Load samples are non-blocking (one conversion
@@ -76,7 +76,7 @@
 // How strongly the motor reacts to each gram of error. Higher = snappier
 // and more likely to overshoot; lower = gentler and slower to settle.
 #ifndef TRUSS_GAIN_SPS_PER_G
-#define TRUSS_GAIN_SPS_PER_G 8.0f
+#define TRUSS_GAIN_SPS_PER_G 12.0f
 #endif
 
 // Inner band: stop when |error| is inside this (grams). This is how close
@@ -99,7 +99,7 @@
 #endif
 
 #ifndef TRUSS_APPROACH_SPS
-#define TRUSS_APPROACH_SPS 50.0f
+#define TRUSS_APPROACH_SPS 80.0f
 #endif
 
 // Very near target: a few steps per HX711 sample, then wait (stiff cable).
@@ -108,7 +108,7 @@
 #endif
 
 #ifndef TRUSS_NUDGE_STEPS
-#define TRUSS_NUDGE_STEPS 3
+#define TRUSS_NUDGE_STEPS 4
 #endif
 
 // How quickly speed can change (steps/s^2). Raise for punchier starts/stops;
@@ -141,8 +141,8 @@
 
 // Stop and fault if the motor keeps going one way this long FAR from
 // target without progress (slack cable, wrong TRUSS_WIND_SIGN, bad cal).
-// Near target (nudge / approach) the timeout does not apply — recovery
-// after an animal lift can take longer than this.
+// The clock resets on any direction change, on progress, and whenever the
+// load is back within TRUSS_APPROACH_G of target.
 #ifndef TRUSS_DIR_TIMEOUT_MS
 #define TRUSS_DIR_TIMEOUT_MS 5000
 #endif
@@ -152,9 +152,11 @@
 #define TRUSS_OVERLOAD_G 800.0f
 #endif
 
-// Hard stop if the motor takes more than this many steps in one Run session.
-#ifndef TRUSS_MAX_STEPS_SESSION
-#define TRUSS_MAX_STEPS_SESSION 200000L
+// Hard stop if the motor takes more than this many steps without the load
+// getting back near target (runaway). The count resets whenever the load
+// is within TRUSS_APPROACH_G, settles in the stop band, or HOLD is used.
+#ifndef TRUSS_MAX_STEPS_UNSETTLED
+#define TRUSS_MAX_STEPS_UNSETTLED 200000L
 #endif
 
 // How many HX711 samples to average when taring / calibrating.
@@ -241,11 +243,11 @@ TrussScreen currentScreen = SCREEN_HOME;
 RunPhase runPhase = PHASE_RUNNING;
 CalPhase calPhase = CAL_TARE;
 
-int16_t targetGrams = 200;
+int16_t targetGrams = 100;
 int16_t calGrams = 200;
 float liveGrams = 0.0f;
 
-char pushLabel[6] = "200g";
+char pushLabel[6] = "100g";
 
 uint32_t savedFlashUntilMs = 0;
 uint32_t noCalFlashUntilMs = 0;
@@ -261,6 +263,7 @@ enum TensionState : uint8_t {
 TensionState tensionState = TENSION_IDLE;
 uint32_t tensionStateSinceMs = 0;
 float lastAbsErrForTimeout = 0.0f;
+uint32_t stepsAtSettle = 0; // sessionStepCount when last near target
 float targetSpsCmd = 0.0f; // set by control loop, chased by the ramp
 float currentSps = 0.0f;   // ramped speed actually applied to the timer
 bool loadFilterSeeded = false;
@@ -519,8 +522,11 @@ void drawHomeHardwareFooter(StepScreenDisplay &d) {
     return;
   }
 
+  // Bottom-align so all lines fit when everything is missing.
+  const int16_t missing = (int16_t)!motorReady + (int16_t)!loadCellReady +
+                          (int16_t)!sdReady;
   d.setTextSize(1);
-  int16_t y = 48;
+  int16_t y = min((int16_t)48, (int16_t)(STEPSCREEN_H - 8 * missing));
   if (!motorReady) {
     d.setCursor(2, y);
     d.print(F("xStepper"));
@@ -1033,6 +1039,7 @@ void enterRun() {
   tensionState = TENSION_IDLE;
   tensionStateSinceMs = millis();
   lastAbsErrForTimeout = 0.0f;
+  stepsAtSettle = 0;
   targetSpsCmd = 0.0f;
   currentSps = 0.0f;
   loadSampleFresh = false;
@@ -1094,7 +1101,7 @@ void serviceRun() {
     return;
   }
 
-  if (sessionStepCount > (uint32_t)TRUSS_MAX_STEPS_SESSION) {
+  if (sessionStepCount - stepsAtSettle > (uint32_t)TRUSS_MAX_STEPS_UNSETTLED) {
     tripFault("step limit");
     return;
   }
@@ -1102,6 +1109,7 @@ void serviceRun() {
   if (runPhase == PHASE_HELD) {
     tensionState = TENSION_IDLE;
     tensionStateSinceMs = now;
+    stepsAtSettle = sessionStepCount;
     targetSpsCmd = 0.0f; // ramp decelerates to a stop
     return;
   }
@@ -1118,6 +1126,14 @@ void serviceRun() {
 
   const float error = (float)targetGrams - liveGrams;
   const float absErr = fabsf(error);
+
+  // Near target is the healthy regime: clear both fault budgets so a later
+  // disturbance (animal lift) starts from a fresh timeout and step count.
+  if (absErr < TRUSS_APPROACH_G) {
+    tensionStateSinceMs = now;
+    lastAbsErrForTimeout = absErr;
+    stepsAtSettle = sessionStepCount;
+  }
 
   // Hysteresis: stop inside the inner band; stay idle until the outer band.
   if (tensionState == TENSION_IDLE) {
@@ -1143,9 +1159,8 @@ void serviceRun() {
     // Closing on the target — keep the direction-timeout clock fresh.
     tensionStateSinceMs = now;
     lastAbsErrForTimeout = absErr;
-  } else if (absErr >= TRUSS_APPROACH_G &&
-             now - tensionStateSinceMs > (uint32_t)TRUSS_DIR_TIMEOUT_MS) {
-    // Only when far from target and not making progress (slack / wrong sign).
+  } else if (now - tensionStateSinceMs > (uint32_t)TRUSS_DIR_TIMEOUT_MS) {
+    // Far from target and not making progress (slack / wrong sign).
     tripFault("direction timeout");
     return;
   }
@@ -1445,11 +1460,11 @@ void drawRun(StepScreenDisplay &d) {
   if (runPhase == PHASE_FAULT) {
     const bool inv = (millis() / 500) & 1;
     if (inv) {
-      d.fillRect(0, 40, STEPSCREEN_CONTENT_W - 4, 19, SH110X_WHITE);
+      d.fillRect(0, 42, STEPSCREEN_CONTENT_W - 4, 18, SH110X_WHITE);
       d.setTextColor(SH110X_BLACK);
     }
     d.setTextSize(2);
-    d.setCursor(2, 42);
+    d.setCursor(2, 43);
     d.print(F("FAULT"));
     d.setTextColor(SH110X_WHITE);
   } else {
@@ -1458,7 +1473,7 @@ void drawRun(StepScreenDisplay &d) {
     const uint8_t ss = totalSec % 60U;
     snprintf(buf, sizeof(buf), "%u:%02u", mm, ss);
     d.setTextSize(2);
-    d.setCursor(2, 42);
+    d.setCursor(2, 43);
     d.print(buf);
   }
 }

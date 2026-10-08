@@ -1,0 +1,5 @@
+// Adafruit_GFX.h includes this unconditionally; nothing here is used on host.
+#ifndef STEPSCREEN_HOST_ADAFRUIT_SPIDEVICE_H
+#define STEPSCREEN_HOST_ADAFRUIT_SPIDEVICE_H
+#include "SPI.h"
+#endif
