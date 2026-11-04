@@ -7,13 +7,15 @@
 
   Home   -- motor disabled.
             Back = mL size picker, Sel = Adjust, OK = Run.
+            Shows syringe size and live VL53L4CD distance (mm).
   Size   -- pick syringe volume (10/20/30/50/60 mL) with the encoder.
             Back = Back (discard), OK = Save (keep selection).
             Selection is stored for a future µL↔steps lookup table;
             serial Run commands still use microsteps for now.
   Adjust -- motor enabled; encoder jogs the motor in both directions.
             OK cycles the speed preset (Low -> Med -> Fast).
-            Back returns Home. Shows position, speed, encoder input.
+            Back returns Home. Shows position, speed, encoder input,
+            and live VL53L4CD distance.
   Run    -- motor disabled until a serial command arrives. Send a signed
             integer + newline (e.g. steps equal to STEPSCREEN_MOTOR_STEPS_PER_REV
             for one revolution) at 115200 baud to move that many microsteps.
@@ -28,7 +30,14 @@
   the display refresh is throttled (and slowed further while a Run move
   is in progress) to keep motion smooth.
 
+  ToF: Adafruit VL53L4CD on Wire (address 0x29). XSHUT is not wired.
+  A missing sensor leaves the UI running and Home shows "Dist: --".
+  Requires the stm32duino VL53L4CD library.
+
   Board: Adafruit Feather M0 Adalogger (or compatible).
+
+  Motor: Stepperonline 17HE08-1004S. Coil wires to the driver:
+    Red = B2, Blue = A2, Green = B1, Black = A1.
 */
 
 #include <StepScreen.h>
@@ -37,6 +46,8 @@
 #include <StepScreenSplash.h>
 #include <StepScreenStepper.h>
 #include <StepScreenTMC2209.h>
+#include <Wire.h>
+#include <vl53l4cd_class.h>
 
 StepScreen screen;
 StepScreenRTC rtc;
@@ -48,6 +59,23 @@ StepScreenStepper stepper;
 #define JOG_STEPS_PER_DETENT STEPSCREEN_MOTOR_MICROSTEPS
 
 bool motorReady = false;
+
+// VL53L4CD Time-of-Flight (shares Wire with the OLED and RTC)
+#ifndef PIN_TOF_XSHUT
+#define PIN_TOF_XSHUT -1
+#endif
+
+#define TOF_I2C_ADDR_8BIT 0x52 // VL53L4CD default (7-bit 0x29)
+#define TOF_POLL_MS 50
+#define TOF_TIMING_BUDGET_MS 200
+#define TOF_INTERMEASUREMENT_MS 0 // 0 = back-to-back
+#define TOF_OUT_OF_RANGE_MM 1300  // VL53L4CD rated max
+
+VL53L4CD tof(&Wire, PIN_TOF_XSHUT);
+bool tofOk = false;
+uint16_t lastRangeMm = 0;
+bool lastRangeValid = false;
+uint32_t lastTofMs = 0;
 
 // Display refresh throttling (OLED I2C transfer blocks stepping)
 #define DRAW_INTERVAL_MS 100
@@ -243,7 +271,81 @@ void handleRun(uint8_t ev) {
   handleSerialCommand();
 }
 
+// --- VL53L4CD ranging (Wire already started by the OLED) ---
+
+bool initTof() {
+  Serial.println(F("ToF: starting VL53L4CD init..."));
+  tof.begin();
+  tof.VL53L4CD_Off();
+
+  const VL53L4CD_ERROR status = tof.InitSensor(TOF_I2C_ADDR_8BIT);
+  if (status != VL53L4CD_ERROR_NONE) {
+    Serial.print(F("ToF: InitSensor failed status="));
+    Serial.println(status);
+    return false;
+  }
+
+  if (tof.VL53L4CD_SetRangeTiming(TOF_TIMING_BUDGET_MS, TOF_INTERMEASUREMENT_MS) !=
+      VL53L4CD_ERROR_NONE) {
+    Serial.println(F("ToF: SetRangeTiming failed"));
+    return false;
+  }
+
+  // Default min-count threshold (~1000 kcps) rejects weak returns and
+  // reports them as status 2 / distance 0.
+  if (tof.VL53L4CD_SetSignalThreshold(0) != VL53L4CD_ERROR_NONE) {
+    Serial.println(F("ToF: SetSignalThreshold failed"));
+    return false;
+  }
+
+  if (tof.VL53L4CD_StartRanging() != VL53L4CD_ERROR_NONE) {
+    Serial.println(F("ToF: StartRanging failed"));
+    return false;
+  }
+
+  Serial.println(F("SyringePump: VL53L4CD ready @ 0x29"));
+  return true;
+}
+
+void pollTof() {
+  if (!tofOk) {
+    return;
+  }
+  if (millis() - lastTofMs < TOF_POLL_MS) {
+    return;
+  }
+  lastTofMs = millis();
+
+  uint8_t ready = 0;
+  if (tof.VL53L4CD_CheckForDataReady(&ready) != VL53L4CD_ERROR_NONE || !ready) {
+    return;
+  }
+
+  tof.VL53L4CD_ClearInterrupt();
+
+  VL53L4CD_Result_t result;
+  if (tof.VL53L4CD_GetResult(&result) != VL53L4CD_ERROR_NONE) {
+    return;
+  }
+
+  lastRangeMm = result.distance_mm;
+  // Status 0 is "range valid". Status 2 is signal-fail (no return);
+  // the distance register is then 0 and must not be shown as a range.
+  lastRangeValid = (result.range_status == 0 && result.distance_mm > 0 &&
+                    result.distance_mm <= TOF_OUT_OF_RANGE_MM);
+}
+
 // --- Drawing ---
+
+void drawDistance(StepScreenDisplay &d) {
+  d.print("Dist: ");
+  if (!tofOk || !lastRangeValid) {
+    d.println("--");
+  } else {
+    d.print(lastRangeMm);
+    d.println(" mm");
+  }
+}
 
 void drawHome(StepScreenDisplay &d) {
   char infoBar[12];
@@ -261,9 +363,7 @@ void drawHome(StepScreenDisplay &d) {
 
   d.setTextSize(1);
   d.setCursor(STEPSCREEN_CONTENT_X, STEPSCREEN_CONTENT_Y + 28);
-  d.println("Click Run to");
-  d.println("execute uL");
-  d.println("delivery.");
+  drawDistance(d);
 }
 
 void drawSize(StepScreenDisplay &d) {
@@ -311,6 +411,7 @@ void drawAdjust(StepScreenDisplay &d) {
   d.println("/s");
   d.print("Enc: ");
   d.println(lastEncoderDelta);
+  drawDistance(d);
 }
 
 void drawRun(StepScreenDisplay &d) {
@@ -386,6 +487,11 @@ void setup() {
   rtc.begin();
   rtc.syncFromBuildTimeIfNeeded();
 
+  tofOk = initTof();
+  if (!tofOk) {
+    Serial.println(F("VL53L4CD init failed — distance shows --."));
+  }
+
   nav.begin(&screen.input());
 
   tmc.begin();
@@ -408,6 +514,7 @@ void setup() {
 
 void loop() {
   stepper.run(); // non-blocking; must run every loop
+  pollTof();
 
   const uint8_t ev = nav.pollNavEvents();
   const int32_t enc = nav.consumeEncoderDelta();

@@ -24,14 +24,16 @@
                                if you use unsigned CONT SPEED + DIR).
     SPEED <sps>                Default max / continuous speed (abs).
     STOP                       Halt motion
-    TOF                        Print last range (also streams continuously)
+    TOF                        Print the latest range once
+    TOF STREAM                 Toggle continuous range printing
     STATUS                     Motor + ToF summary
     RESET POS                  Zero motor position
     INIT                       Re-init ToF
     SCAN                       I2C bus scan
     HELP
 
-  ToF readings print continuously as  tof=123 mm  (including during CONT).
+  ToF is sampled continuously for the display and for TOF / STATUS.
+  Serial lines are printed only on those commands, unless TOF STREAM is on.
 
   Dependencies (Library Manager):
     stm32duino VL53L4CD, AccelStepper, TMCStepper, Adafruit SH110X (+ GFX, BusIO)
@@ -55,9 +57,10 @@
 #endif
 
 #define TOF_I2C_ADDR_8BIT 0x52 // VL53L4CD default (7-bit 0x29)
-#define TOF_POLL_MS 100
-#define TOF_TIMING_BUDGET_MS 50
-#define TOF_OUT_OF_RANGE_MM 4000
+#define TOF_POLL_MS 50
+#define TOF_TIMING_BUDGET_MS 200
+#define TOF_INTERMEASUREMENT_MS 0 // 0 = back-to-back
+#define TOF_OUT_OF_RANGE_MM 1300  // VL53L4CD rated max
 #define DRAW_INTERVAL_MS 150
 #define DRAW_INTERVAL_MOVING_MS 400
 
@@ -80,10 +83,14 @@ MotionMode motionMode = MODE_IDLE;
 float defaultSpeedSps = DEFAULT_SPEED_SPS;
 bool directionForward = true;
 bool tofOk = false;
+bool tofStream = false;
 bool displayOk = false;
 bool motorReady = false;
 
 uint16_t lastRangeMm = 0;
+uint8_t lastRangeStatus = 255;
+uint16_t lastSignalKcps = 0;
+uint16_t lastSigmaMm = 0;
 bool lastRangeValid = false;
 uint32_t lastTofMs = 0;
 uint32_t lastDrawMs = 0;
@@ -243,10 +250,18 @@ bool initTof()
     Serial.println(id, HEX);
   }
 
-  if (tof.VL53L4CD_SetRangeTiming(TOF_TIMING_BUDGET_MS, TOF_POLL_MS) !=
+  if (tof.VL53L4CD_SetRangeTiming(TOF_TIMING_BUDGET_MS, TOF_INTERMEASUREMENT_MS) !=
       VL53L4CD_ERROR_NONE)
   {
     Serial.println(F("ToF: SetRangeTiming failed"));
+    return false;
+  }
+
+  // Default min-count threshold (~1000 kcps) rejects weak returns and
+  // reports them as status 2 / distance 0.
+  if (tof.VL53L4CD_SetSignalThreshold(0) != VL53L4CD_ERROR_NONE)
+  {
+    Serial.println(F("ToF: SetSignalThreshold failed"));
     return false;
   }
 
@@ -266,16 +281,25 @@ void printTofLine()
   if (!tofOk)
   {
     Serial.println(F("N/A"));
+    return;
   }
-  else if (lastRangeValid)
+  if (lastRangeValid)
   {
     Serial.print(lastRangeMm);
     Serial.println(F(" mm"));
+    return;
   }
-  else
+  // Status 2, or a "valid" result with zero return, means the laser
+  // got no light back (cover, aim, or target against the window).
+  if (lastRangeStatus == 2 || lastSignalKcps == 0)
   {
-    Serial.println(F("out of range"));
+    Serial.println(F("no return"));
+    return;
   }
+  Serial.print(F("out of range  status="));
+  Serial.print(lastRangeStatus);
+  Serial.print(F("  dist="));
+  Serial.println(lastRangeMm);
 }
 
 void printStatus()
@@ -329,18 +353,20 @@ void pollTof()
     return;
   }
 
-  if (result.range_status == 0 && result.distance_mm > 0 &&
-      result.distance_mm < TOF_OUT_OF_RANGE_MM)
-  {
-    lastRangeMm = result.distance_mm;
-    lastRangeValid = true;
-  }
-  else
-  {
-    lastRangeValid = false;
-  }
+  lastRangeMm = result.distance_mm;
+  lastRangeStatus = result.range_status;
+  lastSignalKcps = result.signal_rate_kcps;
+  lastSigmaMm = result.sigma_mm;
 
-  printTofLine();
+  // Status 0 is "range valid". Status 2 is signal-fail (no return);
+  // the distance register is then 0 and must not be shown as a range.
+  lastRangeValid = (result.range_status == 0 && result.distance_mm > 0 &&
+                    result.distance_mm <= TOF_OUT_OF_RANGE_MM);
+
+  if (tofStream)
+  {
+    printTofLine();
+  }
 }
 
 void processCommand()
@@ -465,7 +491,23 @@ void processCommand()
   }
   else if (strcmp(token, "TOF") == 0 || strcmp(token, "RANGE") == 0)
   {
-    printTofLine();
+    char *sub = strtok(nullptr, " ");
+    if (sub)
+    {
+      for (char *p = sub; *p; p++)
+      {
+        *p = (char)toupper(*p);
+      }
+    }
+    if (sub && (strcmp(sub, "STREAM") == 0 || strcmp(sub, "CONT") == 0))
+    {
+      tofStream = !tofStream;
+      Serial.println(tofStream ? F("TOF stream on") : F("TOF stream off"));
+    }
+    else
+    {
+      printTofLine();
+    }
   }
   else if (strcmp(token, "SCAN") == 0)
   {
@@ -514,7 +556,8 @@ void processCommand()
     Serial.println(F("  DIR F|R | FWD | REV"));
     Serial.println(F("  SPEED <sps>"));
     Serial.println(F("  STOP"));
-    Serial.println(F("  TOF | SCAN | INIT | STATUS | RESET POS"));
+    Serial.println(F("  TOF | TOF STREAM"));
+    Serial.println(F("  SCAN | INIT | STATUS | RESET POS"));
   }
   else
   {
@@ -648,11 +691,7 @@ void setup()
   Serial.print(F("  microsteps/rev "));
   Serial.println(STEPSCREEN_MOTOR_STEPS_PER_REV);
   Serial.println(F("Ready. Type HELP for commands."));
-  if (tofOk)
-  {
-    Serial.println(F("ToF streams continuously (tof=... mm)."));
-  }
-  else
+  if (!tofOk)
   {
     Serial.println(F("ToF offline. Type INIT to retry."));
   }
