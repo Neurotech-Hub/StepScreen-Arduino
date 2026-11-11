@@ -22,6 +22,10 @@ reward_ul=10
 
 Allowed `syringe_ml`: 10, 30, 60. At **1/64** microsteps: 10 mL → 36.5 steps/µL, 30 → 17, 60 → 9.5. `rewardSteps = round(reward_ul * steps_per_ul)`.
 
+## ToF safety (todo)
+
+VL53L4CD is optional today (probe-skip if absent; Home shows distance only). **Travel/endstop safety from ToF is not implemented yet** — dispense does not stop or refuse motion based on range. Still to do: define safe distance thresholds and gate or abort Run/Dbg moves when the plunger/travel is out of bounds.
+
 ---
 
 ## Bpod RX debug (paused)
