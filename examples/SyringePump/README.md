@@ -4,12 +4,23 @@ Four-screen pump UI on Feather M0 Adalogger + StepScreen (OLED, encoder, TMC2209
 
 | Screen | Role |
 |--------|------|
-| **Home** | Motor off; size + ToF; OK → Run, Sel → Adjust, Back → Size |
-| **Size** | Syringe mL picker (10/20/30/50/60) |
-| **Adjust** | Jog motor; OK cycles Low/Med/Fast SPS |
-| **Run** | USB Serial step commands; Bpod arm/trigger debug on SWD pads |
+| **Home** | Motor off; shows `syringe_ml` + `reward_ul` + ToF; **Set** / **Dbg** / **Run** |
+| **Set** | Encoder edits active field; center toggles mL ↔ µL; **Save** writes `/SYRING.CFG` (brief confirmation); **Back** discards |
+| **Dbg** | Jog motor; OK cycles Low/Med/Fast SPS |
+| **Run** | Rising edge on `PIN_AUX_IN` (A5, HW pull-down) dispenses `reward_ul`; USB Serial steps still work |
 
-USB Serial (115200): send a signed microstep count + newline (e.g. `25600`) while on Run.
+USB Serial (115200): send a signed microstep count + newline (e.g. `25600`) while on Run. AUX trigger is edge-only (debounced rise); a stuck-HIGH line does not repeat until it returns LOW.
+
+## Config (`/SYRING.CFG`)
+
+Created on first SD mount if missing. Example:
+
+```
+syringe_ml=30
+reward_ul=10
+```
+
+Allowed `syringe_ml`: 10, 30, 60. At **1/64** microsteps: 10 mL → 36.5 steps/µL, 30 → 17, 60 → 9.5. `rewardSteps = round(reward_ul * steps_per_ul)`.
 
 ---
 
