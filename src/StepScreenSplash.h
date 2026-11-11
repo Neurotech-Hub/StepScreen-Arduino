@@ -35,7 +35,7 @@ enum StepScreenSplashTheme : uint8_t {
 
 struct StepScreenSplashConfig {
   StepScreenSplashTheme theme = STEPSCREEN_SPLASH_SYRINGE;
-  const char *title = "Syringe Pump v1.0";
+  const char *title = "Syringe Pump v1.1";
   const char *credit = "by the Neurotech Hub";
   uint16_t durationMs = 3200;
   bool skippable = true;

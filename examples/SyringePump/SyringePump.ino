@@ -1223,39 +1223,39 @@ void drawRun(StepScreenDisplay &d)
   const StepScreenActionLabels labels = {"Back", nullptr, nullptr};
   d.drawActionColumn(labels, nav.readBack(), false, false);
 
+  const uint32_t totalUl = (uint32_t)auxFireCount * (uint32_t)rewardUl;
+
   d.setCursor(STEPSCREEN_CONTENT_X, STEPSCREEN_CONTENT_Y + 2);
+  d.print("Syr ");
   d.print(syringeMl());
-  d.print("mL ");
+  d.print("mL, Rwd ");
   d.print(rewardUl);
   d.println("uL");
-  d.print("Rwd ");
-  d.print(rewardSteps());
-  d.println(" stp");
-  d.print("AUX ");
-  d.print(auxStableLevel ? 'H' : 'L');
-  d.print(" #");
-  d.println(auxFireCount);
 
-  d.print("St: ");
+  d.print("Trig #");
+  d.print(auxFireCount);
+  d.print(" = ");
+  d.print(totalUl);
+  d.println("uL");
+
+  d.print("Position ");
+  d.println(motorCurrentPosition());
+
+  d.print("Status ");
   switch (runStatus)
   {
-  case RUN_WAITING:
-    d.println("wait");
-    break;
   case RUN_MOVING:
-    d.print("mv ");
-    d.println(lastCommandSteps);
-    break;
-  case RUN_DONE:
-    d.print("ok ");
-    d.println(lastCommandSteps);
+    d.println("DISPENSE");
     break;
   case RUN_ERROR:
-    d.println("err");
+    d.println("ERROR");
+    break;
+  case RUN_WAITING:
+  case RUN_DONE:
+  default:
+    d.println("READY");
     break;
   }
-  d.print("Pos ");
-  d.println(motorCurrentPosition());
 }
 
 void drawScreen()
@@ -1347,8 +1347,9 @@ void setup()
   STEPSCREEN_ATTACH_ENCODER_ISRS();
   // --- END STEPSCREEN ENCODER ISR SETUP ---
 
-  StepScreenSplash::play(screen.display(), StepScreenSplashConfig{},
-                         &screen.input());
+  StepScreenSplashConfig splash;
+  splash.title = "Syringe Pump v1.1";
+  StepScreenSplash::play(screen.display(), splash, &screen.input());
 
   enterHome();
 }
