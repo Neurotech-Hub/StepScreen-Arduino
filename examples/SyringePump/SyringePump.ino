@@ -6,15 +6,22 @@
   layers.
 
   Home   -- motor disabled.
-            Back = Set, Sel = Dbg (jog), OK = Run.
+            Back = Set, Sel = Dbg (jog), OK = Run (gated on motor 12V).
             Shows syringe_ml, reward_ul, and live VL53L4CD distance (mm).
+            Polls TMC ~1 Hz for VM (GSTAT.uv_cp); without 12V shows
+            "No 12V" and Confirm reads "XXX" instead of "Run".
   Set    -- edit syringe size (10/30/60 mL) or reward_ul with the encoder.
             Center press toggles which field is active. OK = Save writes
             /SYRING.CFG and shows a brief confirmation. Back discards.
   Dbg    -- motor enabled; encoder jogs the motor in both directions.
             OK cycles the speed preset (Low -> Med -> Fast).
             Back returns Home. Shows position, speed, encoder input,
-            and live VL53L4CD distance.
+            and live VL53L4CD distance. USB Serial accepts:
+              Steps <n>   relative microsteps (+/-)
+              Move F|B|S  continuous forward / backward / stop
+              Dist <mm> [mm2]  drive until ToF reaches mm (noop if
+                          within 2 mm of current, or ToF missing).
+                          Optional second mm loops A↔B until stop.
   Run    -- waits for a rising edge on PIN_AUX_IN (HW pull-down; idle LOW)
             from Bpod (~50 ms pulse). Edge-only: a stuck-HIGH line does not
             re-fire until it returns LOW. Dispenses reward_ul via the 1/64
@@ -34,7 +41,8 @@
 
   ToF: optional Adafruit VL53L4CD on Wire (address 0x29). XSHUT is not
   wired. An I2C probe skips init if absent so boot does not hang; UI
-  continues and distance shows "--". Requires stm32duino VL53L4CD when used.
+  shows "No ToF" when missing. Hot-unplug is detected; re-plug re-inits
+  after a ~1 s probe. Requires stm32duino VL53L4CD when used.
 
   Board: Adafruit Feather M0 Adalogger (or compatible).
 
@@ -64,7 +72,7 @@
 #define STEPSCREEN_SPEED_MEDIUM_SPS 3000.0f
 #endif
 #ifndef STEPSCREEN_SPEED_FAST_SPS
-#define STEPSCREEN_SPEED_FAST_SPS 6000.0f
+#define STEPSCREEN_SPEED_FAST_SPS 12000.0f
 #endif
 #ifndef STEPSCREEN_STEPPER_ACCEL
 #define STEPSCREEN_STEPPER_ACCEL 15000.0f
@@ -79,6 +87,7 @@
 #include <StepScreenTMC2209.h>
 #include <SD.h>
 #include <Wire.h>
+#include <ctype.h>
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -100,9 +109,15 @@ StepScreenStepper stepper;
 #define REWARD_UL_DEFAULT 10
 #define AUX_TRIG_DEBOUNCE_MS 3
 #define SET_SAVED_FLASH_MS 1200
+#define MOTOR_READY_POLL_MS 1000
+#define DBG_DIST_TOL_MM 2
+#define DBG_CONT_TARGET_STEPS 100000L
+#define RX_BUF_SIZE 32
 
 bool motorReady = false;
+bool motorConfigured = false;
 bool sdReady = false;
+uint32_t lastMotorReadyPollMs = 0;
 uint32_t setSavedUntilMs = 0;
 bool setSaveOk = false;
 
@@ -125,12 +140,16 @@ uint16_t auxFireCount = 0;
 #define TOF_INTERMEASUREMENT_MS 0 // 0 = back-to-back
 #define TOF_OUT_OF_RANGE_MM 1300  // VL53L4CD rated max
 #define TOF_I2C_PROBE_TIMEOUT_MS 50
+#define TOF_REPROBE_MS 1000
+#define TOF_I2C_FAIL_LIMIT 3
 
 VL53L4CD tof(&Wire, PIN_TOF_XSHUT);
 bool tofOk = false;
 uint16_t lastRangeMm = 0;
 bool lastRangeValid = false;
 uint32_t lastTofMs = 0;
+uint32_t lastTofReprobeMs = 0;
+uint8_t tofI2cFailCount = 0;
 
 #define DRAW_INTERVAL_MS 100
 #define MOTOR_RAMP_MS 5
@@ -173,10 +192,19 @@ enum RunStatus : uint8_t
 };
 
 RunStatus runStatus = RUN_WAITING;
-char rxBuf[16];
+char rxBuf[RX_BUF_SIZE];
 uint8_t rxLen = 0;
 int32_t lastCommandSteps = 0;
 int32_t lastEncoderDelta = 0;
+
+// Dbg serial motion: continuous F/B and ToF Dist closed-loop.
+int8_t dbgRunDir = 0; // +1 forward, -1 backward, 0 not continuous
+bool dbgDistActive = false;
+bool dbgDistLoop = false; // Dist A B: oscillate until Move S / jog / Back
+uint16_t dbgDistTargetMm = 0;
+uint16_t dbgDistAMm = 0;
+uint16_t dbgDistBMm = 0;
+int8_t dbgDistDir = 0; // sign of travel toward current Dist target
 
 // ISR step generation (Truss-style). Position/target are volatile; the
 // main loop only changes the commanded rate — TC3 keeps pulsing.
@@ -302,6 +330,12 @@ bool motorIsRunning();
 int32_t motorCurrentPosition();
 void motorMoveRelative(int32_t steps);
 void serviceMotor();
+void dbgClearSerialMotion();
+void dbgEnsureMotorLive();
+void dbgSetContinuous(int8_t dir);
+void dbgServiceSerialMotion();
+void printDbgSerialHelp();
+void handleDbgSerialCommand();
 
 uint8_t syringeMl() { return SYRINGE_ML_OPTIONS[syringeMlIndex]; }
 
@@ -465,6 +499,69 @@ void pollSd() {
   }
 }
 
+// Re-check TMC UART + motor supply (GSTAT.uv_cp). Lets Home recover when
+// the user plugs in 12V after booting from USB alone.
+void refreshMotorReady() {
+  const bool prev = motorReady;
+
+  if (!tmc.isReady() && !tmc.verify()) {
+    motorReady = false;
+    motorConfigured = false;
+    if (prev) {
+      Serial.println(F("[TMC] UART not ready"));
+    }
+    return;
+  }
+
+  TMC2209Stepper &drv = tmc.driver();
+  // GSTAT bits are sticky (W1C). Clear after read so late 12V / power
+  // restore can recover, and so reset does not force reconfigure forever.
+  const bool sawReset = drv.reset();
+  const bool sawUv = drv.uv_cp();
+  if (sawReset || sawUv) {
+    drv.GSTAT(0b111);
+  }
+  if (sawReset) {
+    Serial.println(F("[TMC] chip reset — will reconfigure"));
+    motorConfigured = false;
+  }
+  if (sawUv && drv.uv_cp()) {
+    motorReady = false;
+    if (prev) {
+      Serial.println(F("[TMC] no motor supply (uv_cp)"));
+    }
+    return;
+  }
+
+  if (!motorConfigured) {
+    if (!tmc.configureForStepDir()) {
+      motorReady = false;
+      if (prev) {
+        Serial.println(F("[TMC] configure failed"));
+      }
+      return;
+    }
+    motorConfigured = true;
+  }
+
+  motorReady = true;
+  if (!prev) {
+    Serial.println(F("[TMC] motor ready (12V ok)"));
+  }
+}
+
+void pollMotorReady() {
+  if (currentScreen != SCREEN_HOME) {
+    return;
+  }
+  const uint32_t now = millis();
+  if ((uint32_t)(now - lastMotorReadyPollMs) < MOTOR_READY_POLL_MS) {
+    return;
+  }
+  lastMotorReadyPollMs = now;
+  refreshMotorReady();
+}
+
 void setMotorTickActive(bool active)
 {
   motorTickActive = active;
@@ -597,7 +694,13 @@ void serviceMotor()
   interrupts();
   const int32_t dist = tgt - pos;
 
-  if (dist == 0)
+  // Continuous Move/Dist: cruise at the current speed preset (no target
+  // trapezoid). Target is only kept ahead so the ISR keeps pulsing.
+  if (dbgRunDir != 0)
+  {
+    targetSpsCmd = (float)dbgRunDir * stepper.speedPresetSps();
+  }
+  else if (dist == 0)
   {
     // Arrived: drop the pulse train immediately (ISR already stopped
     // advancing position when pos == target).
@@ -691,6 +794,7 @@ void serviceMotor()
 void enterHome()
 {
   currentScreen = SCREEN_HOME;
+  dbgClearSerialMotion();
   motorStopHard();
   setMotorTickActive(false);
   stepper.disable();
@@ -717,6 +821,12 @@ void enterAdjust()
 {
   currentScreen = SCREEN_ADJUST;
   lastEncoderDelta = 0;
+  dbgClearSerialMotion();
+  rxLen = 0;
+  while (Serial.available())
+  {
+    Serial.read();
+  }
   if (motorReady)
   {
     stepper.enable();
@@ -724,7 +834,7 @@ void enterAdjust()
     lastRampMs = millis();
   }
   nav.enterScreen();
-  Serial.println(F("[Dbg] encoder jogs motor"));
+  printDbgSerialHelp();
 }
 
 bool startRewardMove(int32_t steps, const __FlashStringHelper *source)
@@ -835,45 +945,357 @@ void enterRun()
   Serial.println(F(" steps); Serial steps+\\n still works"));
 }
 
-// --- Run-screen serial protocol ---
+// --- Serial line reader (shared rxBuf; Run vs Dbg parsers differ) ---
 
-void handleSerialCommand()
+bool readSerialLine()
 {
   while (Serial.available())
   {
     const char c = (char)Serial.read();
-
     if (c == '\n' || c == '\r')
     {
       if (rxLen == 0)
       {
-        continue; // ignore blank lines / CRLF pairs
+        continue;
       }
       rxBuf[rxLen] = '\0';
       rxLen = 0;
-
-      char *end = nullptr;
-      const long steps = strtol(rxBuf, &end, 10);
-      if (end == rxBuf || *end != '\0')
-      {
-        runStatus = RUN_ERROR;
-        Serial.print(F("error: not a number: "));
-        Serial.println(rxBuf);
-        continue;
-      }
-
-      startRewardMove((int32_t)steps, F("serial"));
+      return true;
     }
-    else if (rxLen < sizeof(rxBuf) - 1)
+    if (rxLen < sizeof(rxBuf) - 1)
     {
       rxBuf[rxLen++] = c;
     }
     else
     {
-      rxLen = 0; // overflow: drop the line
-      runStatus = RUN_ERROR;
+      rxLen = 0;
       Serial.println(F("error: command too long"));
     }
+  }
+  return false;
+}
+
+bool cmdTokenIs(const char *s, const char *word)
+{
+  size_t i = 0;
+  while (word[i] != '\0')
+  {
+    if (s[i] == '\0' ||
+        tolower((unsigned char)s[i]) != tolower((unsigned char)word[i]))
+    {
+      return false;
+    }
+    i++;
+  }
+  return s[i] == '\0' || s[i] == ' ' || s[i] == '\t';
+}
+
+void printDbgSerialHelp()
+{
+  Serial.println(F("[Dbg] serial commands:"));
+  Serial.println(F("  Steps <n>   relative microsteps (+/-)"));
+  Serial.println(F("  Move F|B|S  forward / backward / stop"));
+  Serial.println(F("  Dist <mm>       drive until ToF reaches mm"));
+  Serial.println(F("  Dist <mm> <mm2> loop between those ToF distances"));
+  Serial.println(F("             (noop if within 2mm or no ToF)"));
+  Serial.println(F("encoder jogs; OK cycles speed"));
+}
+
+void dbgClearSerialMotion()
+{
+  dbgRunDir = 0;
+  dbgDistActive = false;
+  dbgDistLoop = false;
+  dbgDistDir = 0;
+}
+
+bool dbgDistNear(uint16_t mm)
+{
+  if (!lastRangeValid)
+  {
+    return false;
+  }
+  const int16_t err = (int16_t)mm - (int16_t)lastRangeMm;
+  return err <= DBG_DIST_TOL_MM && err >= -DBG_DIST_TOL_MM;
+}
+
+// Aim continuous travel at a ToF target (positive steps raise ToF).
+void dbgAimDistTarget(uint16_t mm)
+{
+  dbgDistTargetMm = mm;
+  const int16_t err = (int16_t)mm - (int16_t)lastRangeMm;
+  dbgDistDir = (err >= 0) ? 1 : -1;
+  dbgDistActive = true;
+  dbgSetContinuous(dbgDistDir);
+}
+
+void dbgEnsureMotorLive()
+{
+  if (!motorReady)
+  {
+    return;
+  }
+  stepper.enable();
+  // Only reset the ramp clock when starting from a dead stop — refreshing
+  // it every Move/Dist service tick starved accel and crawled at ~0 sps.
+  if (!motorTickActive)
+  {
+    setMotorTickActive(true);
+    lastRampMs = millis();
+  }
+}
+
+// Keep ISR target ahead so continuous F/B does not decelerate into a stop.
+void dbgSetContinuous(int8_t dir)
+{
+  dbgRunDir = dir;
+  if (dir == 0)
+  {
+    return;
+  }
+  dbgEnsureMotorLive();
+  noInterrupts();
+  motorTarget = motorPosition + (int32_t)dir * DBG_CONT_TARGET_STEPS;
+  interrupts();
+}
+
+void dbgServiceSerialMotion()
+{
+  if (dbgDistActive)
+  {
+    if (!tofOk || !lastRangeValid)
+    {
+      motorStopHard();
+      dbgClearSerialMotion();
+      Serial.println(F("[Dbg] Dist aborted — ToF lost"));
+      return;
+    }
+    const int16_t err =
+        (int16_t)dbgDistTargetMm - (int16_t)lastRangeMm;
+    // Stop in the ±2 mm band, or once we have reached/passed the target
+    // along the original travel direction (avoids overshoot hunting).
+    const bool arrived =
+        (err <= DBG_DIST_TOL_MM && err >= -DBG_DIST_TOL_MM) ||
+        (dbgDistDir > 0 && err <= DBG_DIST_TOL_MM) ||
+        (dbgDistDir < 0 && err >= -DBG_DIST_TOL_MM);
+    if (arrived)
+    {
+      if (dbgDistLoop)
+      {
+        const uint16_t nextMm =
+            (dbgDistTargetMm == dbgDistAMm) ? dbgDistBMm : dbgDistAMm;
+        Serial.print(F("[Dbg] Dist cycle ToF="));
+        Serial.print(lastRangeMm);
+        Serial.print(F(" -> "));
+        Serial.println(nextMm);
+        dbgAimDistTarget(nextMm);
+        return;
+      }
+      motorStopHard();
+      dbgClearSerialMotion();
+      Serial.print(F("[Dbg] Dist done ToF="));
+      Serial.print(lastRangeMm);
+      Serial.println(F(" mm"));
+      return;
+    }
+    dbgSetContinuous(dbgDistDir);
+    return;
+  }
+
+  if (dbgRunDir != 0)
+  {
+    dbgSetContinuous(dbgRunDir);
+  }
+}
+
+void handleDbgSerialCommand()
+{
+  while (readSerialLine())
+  {
+    // Skip leading spaces.
+    char *p = rxBuf;
+    while (*p == ' ' || *p == '\t')
+    {
+      p++;
+    }
+
+    if (cmdTokenIs(p, "Steps"))
+    {
+      p += 5;
+      while (*p == ' ' || *p == '\t')
+      {
+        p++;
+      }
+      char *end = nullptr;
+      const long steps = strtol(p, &end, 10);
+      if (end == p || *end != '\0')
+      {
+        Serial.print(F("error: Steps needs an integer: "));
+        Serial.println(rxBuf);
+        continue;
+      }
+      if (!motorReady)
+      {
+        Serial.println(F("[Dbg] motor not ready"));
+        continue;
+      }
+      dbgClearSerialMotion();
+      dbgEnsureMotorLive();
+      motorMoveRelative((int32_t)steps);
+      Serial.print(F("[Dbg] Steps "));
+      Serial.println((int32_t)steps);
+      continue;
+    }
+
+    if (cmdTokenIs(p, "Move"))
+    {
+      p += 4;
+      while (*p == ' ' || *p == '\t')
+      {
+        p++;
+      }
+      const char cmd = (char)toupper((unsigned char)p[0]);
+      if ((cmd != 'F' && cmd != 'B' && cmd != 'S') || p[1] != '\0')
+      {
+        Serial.println(F("error: Move F|B|S"));
+        continue;
+      }
+      if (cmd == 'S')
+      {
+        motorStopHard();
+        dbgClearSerialMotion();
+        Serial.println(F("[Dbg] Move S"));
+        continue;
+      }
+      if (!motorReady)
+      {
+        Serial.println(F("[Dbg] motor not ready"));
+        continue;
+      }
+      dbgClearSerialMotion();
+      dbgSetContinuous(cmd == 'F' ? 1 : -1);
+      Serial.print(F("[Dbg] Move "));
+      Serial.println(cmd);
+      continue;
+    }
+
+    if (cmdTokenIs(p, "Dist"))
+    {
+      p += 4;
+      while (*p == ' ' || *p == '\t')
+      {
+        p++;
+      }
+      char *end = nullptr;
+      const long mm = strtol(p, &end, 10);
+      if (end == p || mm < 0 || mm > TOF_OUT_OF_RANGE_MM)
+      {
+        Serial.print(F("error: Dist <mm> [mm2] (0.."));
+        Serial.print(TOF_OUT_OF_RANGE_MM);
+        Serial.println(F(")"));
+        continue;
+      }
+      while (*end == ' ' || *end == '\t')
+      {
+        end++;
+      }
+      bool loop = false;
+      long mm2 = 0;
+      if (*end != '\0')
+      {
+        char *end2 = nullptr;
+        mm2 = strtol(end, &end2, 10);
+        if (end2 == end || *end2 != '\0' || mm2 < 0 ||
+            mm2 > TOF_OUT_OF_RANGE_MM)
+        {
+          Serial.print(F("error: Dist <mm> [mm2] (0.."));
+          Serial.print(TOF_OUT_OF_RANGE_MM);
+          Serial.println(F(")"));
+          continue;
+        }
+        loop = true;
+      }
+      if (!tofOk || !lastRangeValid)
+      {
+        Serial.println(F("[Dbg] Dist ignored — ToF not available"));
+        continue;
+      }
+      if (!motorReady)
+      {
+        Serial.println(F("[Dbg] motor not ready"));
+        continue;
+      }
+
+      if (loop)
+      {
+        const int16_t span = (int16_t)mm - (int16_t)mm2;
+        if (span <= DBG_DIST_TOL_MM && span >= -DBG_DIST_TOL_MM)
+        {
+          Serial.println(F("[Dbg] Dist loop ignored — ends within 2 mm"));
+          continue;
+        }
+        dbgDistAMm = (uint16_t)mm;
+        dbgDistBMm = (uint16_t)mm2;
+        dbgDistLoop = true;
+        // Already at A → head to B first so the cycle starts immediately.
+        const uint16_t firstMm =
+            dbgDistNear(dbgDistAMm) ? dbgDistBMm : dbgDistAMm;
+        dbgAimDistTarget(firstMm);
+        Serial.print(F("[Dbg] Dist loop "));
+        Serial.print(dbgDistAMm);
+        Serial.print(F(" <-> "));
+        Serial.print(dbgDistBMm);
+        Serial.print(F(" mm (first "));
+        Serial.print(firstMm);
+        Serial.print(F(", from "));
+        Serial.print(lastRangeMm);
+        Serial.println(F(")"));
+        continue;
+      }
+
+      if (dbgDistNear((uint16_t)mm))
+      {
+        Serial.print(F("[Dbg] Dist ignored — within "));
+        Serial.print(DBG_DIST_TOL_MM);
+        Serial.print(F(" mm (ToF="));
+        Serial.print(lastRangeMm);
+        Serial.println(F(")"));
+        continue;
+      }
+      dbgDistLoop = false;
+      dbgAimDistTarget((uint16_t)mm);
+      Serial.print(F("[Dbg] Dist "));
+      Serial.print(dbgDistTargetMm);
+      Serial.print(F(" mm (from "));
+      Serial.print(lastRangeMm);
+      Serial.println(F(")"));
+      continue;
+    }
+
+    Serial.print(F("error: unknown command: "));
+    Serial.println(rxBuf);
+  }
+
+  dbgServiceSerialMotion();
+}
+
+// --- Run-screen serial protocol ---
+
+void handleSerialCommand()
+{
+  while (readSerialLine())
+  {
+    char *end = nullptr;
+    const long steps = strtol(rxBuf, &end, 10);
+    if (end == rxBuf || *end != '\0')
+    {
+      runStatus = RUN_ERROR;
+      Serial.print(F("error: not a number: "));
+      Serial.println(rxBuf);
+      continue;
+    }
+
+    startRewardMove((int32_t)steps, F("serial"));
   }
 
   // Move finished: release the motor and report
@@ -902,6 +1324,11 @@ void handleHome(uint8_t ev)
   }
   else if (ev & STEPSCREEN_EVT_CONFIRM)
   {
+    if (!motorReady)
+    {
+      Serial.println(F("[Home] Run blocked — need 12V"));
+      return;
+    }
     enterRun();
   }
 }
@@ -987,9 +1414,13 @@ void handleAdjust(uint8_t ev, int32_t enc)
   }
   if (enc != 0 && motorReady)
   {
+    // Encoder jog cancels continuous / Dist closed-loop.
+    dbgClearSerialMotion();
     lastEncoderDelta = enc;
+    dbgEnsureMotorLive();
     motorMoveRelative(enc * JOG_STEPS_PER_DETENT);
   }
+  handleDbgSerialCommand();
 }
 
 void handleRun(uint8_t ev)
@@ -1009,6 +1440,20 @@ bool i2cProbe(uint8_t addr7)
 {
   Wire.beginTransmission(addr7);
   return Wire.endTransmission() == 0;
+}
+
+void markTofLost(const __FlashStringHelper *why)
+{
+  if (tofOk)
+  {
+    Serial.print(F("ToF: lost — "));
+    Serial.println(why);
+  }
+  tofOk = false;
+  lastRangeValid = false;
+  lastRangeMm = 0;
+  tofI2cFailCount = 0;
+  lastTofReprobeMs = millis();
 }
 
 bool initTof()
@@ -1057,24 +1502,68 @@ bool initTof()
     return false;
   }
 
+  tofI2cFailCount = 0;
+  lastRangeValid = false;
   Serial.println(F("SyringePump: VL53L4CD ready @ 0x29"));
   return true;
 }
 
 void pollTof()
 {
+  const uint32_t now = millis();
+
+  // Absent / previously lost: re-probe ~1 Hz and re-init on plug-in.
   if (!tofOk)
   {
+    if ((uint32_t)(now - lastTofReprobeMs) < TOF_REPROBE_MS)
+    {
+      return;
+    }
+    lastTofReprobeMs = now;
+    Wire.setClock(100000);
+#if defined(WIRE_HAS_TIMEOUT) || defined(ARDUINO_ARCH_SAMD)
+    Wire.setTimeout(TOF_I2C_PROBE_TIMEOUT_MS);
+#endif
+    if (!i2cProbe(TOF_I2C_ADDR_7BIT))
+    {
+      return;
+    }
+    Serial.println(F("ToF: device detected — re-init"));
+    tofOk = initTof();
+    if (!tofOk)
+    {
+      Serial.println(F("ToF: re-init failed — will retry"));
+    }
     return;
   }
-  if (millis() - lastTofMs < TOF_POLL_MS)
+
+  if ((uint32_t)(now - lastTofMs) < TOF_POLL_MS)
   {
     return;
   }
-  lastTofMs = millis();
+  lastTofMs = now;
+
+  // Periodic presence check so unplug is noticed even if API stays quiet.
+  if ((uint32_t)(now - lastTofReprobeMs) >= TOF_REPROBE_MS)
+  {
+    lastTofReprobeMs = now;
+    if (!i2cProbe(TOF_I2C_ADDR_7BIT))
+    {
+      markTofLost(F("unplugged"));
+      return;
+    }
+  }
 
   uint8_t ready = 0;
-  if (tof.VL53L4CD_CheckForDataReady(&ready) != VL53L4CD_ERROR_NONE || !ready)
+  if (tof.VL53L4CD_CheckForDataReady(&ready) != VL53L4CD_ERROR_NONE)
+  {
+    if (++tofI2cFailCount >= TOF_I2C_FAIL_LIMIT)
+    {
+      markTofLost(F("I2C error"));
+    }
+    return;
+  }
+  if (!ready)
   {
     return;
   }
@@ -1084,9 +1573,14 @@ void pollTof()
   VL53L4CD_Result_t result;
   if (tof.VL53L4CD_GetResult(&result) != VL53L4CD_ERROR_NONE)
   {
+    if (++tofI2cFailCount >= TOF_I2C_FAIL_LIMIT)
+    {
+      markTofLost(F("I2C error"));
+    }
     return;
   }
 
+  tofI2cFailCount = 0;
   lastRangeMm = result.distance_mm;
   // Status 0 is "range valid". Status 2 is signal-fail (no return);
   // the distance register is then 0 and must not be shown as a range.
@@ -1099,7 +1593,11 @@ void pollTof()
 void drawDistance(StepScreenDisplay &d)
 {
   d.print("Dist: ");
-  if (!tofOk || !lastRangeValid)
+  if (!tofOk)
+  {
+    d.println("No ToF");
+  }
+  else if (!lastRangeValid)
   {
     d.println("--");
   }
@@ -1115,7 +1613,8 @@ void drawHome(StepScreenDisplay &d)
   char infoBar[12];
   rtc.formatInfoBar(infoBar, sizeof(infoBar));
   d.drawInfoBar(infoBar);
-  const StepScreenActionLabels labels = {"Set", "Dbg", "Run"};
+  const StepScreenActionLabels labels = {"Set", "Dbg",
+                                         motorReady ? "Run" : "XXX"};
   d.drawActionColumn(labels, nav.readBack(), nav.readPush(),
                      nav.readConfirm());
 
@@ -1125,12 +1624,17 @@ void drawHome(StepScreenDisplay &d)
   d.println(" mL");
 
   d.setTextSize(1);
-  d.setCursor(STEPSCREEN_CONTENT_X, STEPSCREEN_CONTENT_Y + 24);
+  d.setCursor(STEPSCREEN_CONTENT_X, STEPSCREEN_CONTENT_Y + 22);
   d.print("Rwd ");
   d.print(rewardUl);
   d.println(" uL");
-  d.setCursor(STEPSCREEN_CONTENT_X, STEPSCREEN_CONTENT_Y + 36);
+  d.setCursor(STEPSCREEN_CONTENT_X, STEPSCREEN_CONTENT_Y + 34);
   drawDistance(d);
+  if (!motorReady)
+  {
+    d.setCursor(STEPSCREEN_CONTENT_X, STEPSCREEN_CONTENT_Y + 46);
+    d.println("No 12V");
+  }
 }
 
 void drawSet(StepScreenDisplay &d)
@@ -1215,6 +1719,10 @@ void drawAdjust(StepScreenDisplay &d)
   d.print("Enc: ");
   d.println(lastEncoderDelta);
   drawDistance(d);
+  if (!motorReady)
+  {
+    d.println("No 12V");
+  }
 }
 
 void drawRun(StepScreenDisplay &d)
@@ -1323,15 +1831,22 @@ void setup()
   nav.begin(&screen.input());
 
   tmc.begin();
-  motorReady = stepper.beginWithDriver(tmc);
-  if (!motorReady)
+  motorConfigured = false;
+  if (stepper.beginWithDriver(tmc))
   {
+    motorConfigured = true;
+    refreshMotorReady(); // apply uv_cp check after configure
+  }
+  else
+  {
+    motorReady = false;
     Serial.println(F("TMC2209 UART failed — UI only, no motion."));
     StepScreenTMC2209::printWiringHelp();
     stepper.begin();
   }
   // Boot on Fast; OK on Dbg still cycles Low -> Med -> Fast.
   stepper.setSpeedPreset(STEPSCREEN_SPEED_FAST);
+  lastMotorReadyPollMs = millis();
 
 #if defined(ARDUINO_ARCH_SAMD)
   pinMode(PIN_MOTOR_STEP, OUTPUT);
@@ -1359,6 +1874,7 @@ void loop()
   serviceMotor();
   pollTof();
   pollSd();
+  pollMotorReady();
 
   const uint8_t ev = nav.pollNavEvents();
   const int32_t enc = nav.consumeEncoderDelta();

@@ -4,9 +4,9 @@ Four-screen pump UI on Feather M0 Adalogger + StepScreen (OLED, encoder, TMC2209
 
 | Screen | Role |
 |--------|------|
-| **Home** | Motor off; shows `syringe_ml` + `reward_ul` + ToF; **Set** / **Dbg** / **Run** |
+| **Home** | Motor off; shows `syringe_ml` + `reward_ul` + ToF; **Set** / **Dbg** / **Run** (or **XXX** if no 12V). Polls TMC ~1 Hz for VM (`GSTAT.uv_cp`); shows **No 12V** when absent |
 | **Set** | Encoder edits active field; center toggles mL ↔ µL; **Save** writes `/SYRING.CFG` (brief confirmation); **Back** discards |
-| **Dbg** | Jog motor; OK cycles Low/Med/Fast SPS |
+| **Dbg** | Jog motor; OK cycles Low/Med/Fast SPS; shows **No 12V** when VM absent |
 | **Run** | Rising edge on `PIN_AUX_IN` (A5, HW pull-down) dispenses `reward_ul`; USB Serial steps still work |
 
 USB Serial (115200): send a signed microstep count + newline (e.g. `25600`) while on Run. AUX trigger is edge-only (debounced rise); a stuck-HIGH line does not repeat until it returns LOW.
