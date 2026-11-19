@@ -51,7 +51,7 @@
 #endif
 
 #ifndef STEPSCREEN_TMC2209_RUN_CURRENT_MA
-#define STEPSCREEN_TMC2209_RUN_CURRENT_MA 800
+#define STEPSCREEN_TMC2209_RUN_CURRENT_MA 1100
 #endif
 
 #include <StepScreen.h>
@@ -97,17 +97,20 @@ int16_t sessionDurationMin = 0;
 #define DRAW_INTERVAL_MS 50
 #define DRAW_INTERVAL_RUNNING_MS 100
 
-enum TmScreen : uint8_t {
+enum TmScreen : uint8_t
+{
   SCREEN_HOME,
   SCREEN_RUN,
 };
 
-enum EditTarget : uint8_t {
+enum EditTarget : uint8_t
+{
   EDIT_SPEED,
   EDIT_TIME,
 };
 
-enum RunPhase : uint8_t {
+enum RunPhase : uint8_t
+{
   PHASE_RUNNING,
   PHASE_DONE,
 };
@@ -139,63 +142,76 @@ bool displayDirty = true;
 #define MOTOR_TIMER_PRESCALE 2
 #define MOTOR_TIMER_HZ (MOTOR_GCLK_HZ / MOTOR_TIMER_PRESCALE)
 #define MOTOR_PERIOD_MAX 65536u // MFRQ: CC = period - 1 fits in 16 bits
-#define STEP_PULSE_US 2 // TMC2209 STEP high time; avoid zero-width toggles
+#define STEP_PULSE_US 2         // TMC2209 STEP high time; avoid zero-width toggles
 // Ignore tiny period tweaks during ramp (avoids CC glitches mid-run).
 #define MOTOR_PERIOD_UPDATE_PCT 2u
 
-void motorTimerStop() {
+void motorTimerStop()
+{
   TC3->COUNT16.CTRLA.bit.ENABLE = 0;
-  while (TC3->COUNT16.STATUS.bit.SYNCBUSY) {
+  while (TC3->COUNT16.STATUS.bit.SYNCBUSY)
+  {
   }
   TC3->COUNT16.INTFLAG.reg = TC_INTFLAG_MC0;
 }
 
-void motorTimerApplyPeriod(uint32_t period) {
+void motorTimerApplyPeriod(uint32_t period)
+{
   noInterrupts();
   motorTimerStop();
   stepPeriodTicks = period;
   TC3->COUNT16.CC[0].reg = (uint16_t)(period - 1);
-  while (TC3->COUNT16.STATUS.bit.SYNCBUSY) {
+  while (TC3->COUNT16.STATUS.bit.SYNCBUSY)
+  {
   }
   TC3->COUNT16.COUNT.reg = 0;
-  while (TC3->COUNT16.STATUS.bit.SYNCBUSY) {
+  while (TC3->COUNT16.STATUS.bit.SYNCBUSY)
+  {
   }
   TC3->COUNT16.INTFLAG.reg = TC_INTFLAG_MC0;
   TC3->COUNT16.CTRLA.bit.ENABLE = 1;
-  while (TC3->COUNT16.STATUS.bit.SYNCBUSY) {
+  while (TC3->COUNT16.STATUS.bit.SYNCBUSY)
+  {
   }
   interrupts();
 }
 
-void initMotorTimer() {
+void initMotorTimer()
+{
   GCLK->CLKCTRL.reg = (uint16_t)(GCLK_CLKCTRL_CLKEN | GCLK_CLKCTRL_GEN_GCLK0 |
                                  GCLK_CLKCTRL_ID_TCC2_TC3);
-  while (GCLK->STATUS.bit.SYNCBUSY) {
+  while (GCLK->STATUS.bit.SYNCBUSY)
+  {
   }
 
   TC3->COUNT16.CTRLA.bit.ENABLE = 0;
-  while (TC3->COUNT16.STATUS.bit.SYNCBUSY) {
+  while (TC3->COUNT16.STATUS.bit.SYNCBUSY)
+  {
   }
 
   TC3->COUNT16.CTRLA.reg = TC_CTRLA_MODE_COUNT16 | TC_CTRLA_WAVEGEN_MFRQ |
-                             TC_CTRLA_PRESCALER_DIV2;
+                           TC_CTRLA_PRESCALER_DIV2;
   TC3->COUNT16.INTENSET.reg = TC_INTENSET_MC0;
   TC3->COUNT16.INTFLAG.reg = TC_INTFLAG_MC0;
   NVIC_EnableIRQ(TC3_IRQn);
 }
 
-void isrStepPulse() {
+void isrStepPulse()
+{
   digitalWrite(PIN_MOTOR_STEP, HIGH);
   delayMicroseconds(STEP_PULSE_US);
   digitalWrite(PIN_MOTOR_STEP, LOW);
 }
 
-void TC3_Handler() {
-  if (TC3->COUNT16.INTFLAG.bit.MC0 == 0) {
+void TC3_Handler()
+{
+  if (TC3->COUNT16.INTFLAG.bit.MC0 == 0)
+  {
     return;
   }
   TC3->COUNT16.INTFLAG.reg = TC_INTFLAG_MC0;
-  if (!motorTickActive || stepPeriodTicks == 0) {
+  if (!motorTickActive || stepPeriodTicks == 0)
+  {
     return;
   }
   isrStepPulse();
@@ -204,25 +220,29 @@ void TC3_Handler() {
 
 void applyStepRate(float sps, bool force = false);
 
-void setMotorTickActive(bool active) {
+void setMotorTickActive(bool active)
+{
   motorTickActive = active;
 #if defined(ARDUINO_ARCH_SAMD)
   noInterrupts();
   motorTimerStop();
-  if (!active) {
+  if (!active)
+  {
     stepPeriodTicks = 0;
   }
   interrupts();
 #endif
 }
 
-void applyStepRate(float sps, bool force) {
+void applyStepRate(float sps, bool force)
+{
   const float absSps = fabsf(sps);
 
 #if defined(ARDUINO_ARCH_SAMD)
   digitalWrite(PIN_MOTOR_DIR, (sps >= 0.0f) ? HIGH : LOW);
 
-  if (!motorTickActive || absSps < 1.0f) {
+  if (!motorTickActive || absSps < 1.0f)
+  {
     noInterrupts();
     motorTimerStop();
     stepPeriodTicks = 0;
@@ -231,53 +251,67 @@ void applyStepRate(float sps, bool force) {
   }
 
   uint32_t period = (uint32_t)(MOTOR_TIMER_HZ / absSps);
-  if (period < 2) {
+  if (period < 2)
+  {
     period = 2;
-  } else if (period > MOTOR_PERIOD_MAX) {
+  }
+  else if (period > MOTOR_PERIOD_MAX)
+  {
     period = MOTOR_PERIOD_MAX;
   }
 
-  if (!force && stepPeriodTicks > 0 && TC3->COUNT16.CTRLA.bit.ENABLE) {
-    if (period == stepPeriodTicks) {
+  if (!force && stepPeriodTicks > 0 && TC3->COUNT16.CTRLA.bit.ENABLE)
+  {
+    if (period == stepPeriodTicks)
+    {
       return;
     }
     const uint32_t diff =
         (period > stepPeriodTicks) ? (period - stepPeriodTicks)
                                    : (stepPeriodTicks - period);
-    if (diff * 100u < stepPeriodTicks * MOTOR_PERIOD_UPDATE_PCT) {
+    if (diff * 100u < stepPeriodTicks * MOTOR_PERIOD_UPDATE_PCT)
+    {
       return;
     }
   }
 
   motorTimerApplyPeriod(period);
 #else
-  if (motorTickActive && absSps >= 1.0f) {
+  if (motorTickActive && absSps >= 1.0f)
+  {
     stepper.setSpeed(sps);
-  } else {
+  }
+  else
+  {
     stepper.setSpeed(0.0f);
   }
 #endif
 }
 
-void updateTargetSps() {
+void updateTargetSps()
+{
   targetSps = (float)speedCms * STEPSCREEN_TREADMILL_SPS_PER_CMS;
-  if (!directionFwd) {
+  if (!directionFwd)
+  {
     targetSps = -targetSps;
   }
 }
 
 // --- Status LEDs (PIN_LED_GREEN / PIN_LED_RED) ---
 
-void initStatusLeds() {
+void initStatusLeds()
+{
   pinMode(PIN_LED_GREEN, OUTPUT);
   pinMode(PIN_LED_RED, OUTPUT);
   digitalWrite(PIN_LED_GREEN, LOW);
   digitalWrite(PIN_LED_RED, LOW);
 }
 
-void playBootLedDance() {
+void playBootLedDance()
+{
   initStatusLeds();
-  for (uint8_t i = 0; i < 3; i++) {
+  for (uint8_t i = 0; i < 3; i++)
+  {
     digitalWrite(PIN_LED_GREEN, HIGH);
     delay(70);
     digitalWrite(PIN_LED_GREEN, LOW);
@@ -293,14 +327,17 @@ void playBootLedDance() {
   digitalWrite(PIN_LED_RED, LOW);
 }
 
-void updateStatusLeds() {
-  if (currentScreen == SCREEN_HOME) {
+void updateStatusLeds()
+{
+  if (currentScreen == SCREEN_HOME)
+  {
     digitalWrite(PIN_LED_GREEN, LOW);
     digitalWrite(PIN_LED_RED, LOW);
     return;
   }
 
-  if (runPhase == PHASE_RUNNING) {
+  if (runPhase == PHASE_RUNNING)
+  {
     digitalWrite(PIN_LED_GREEN, HIGH);
     digitalWrite(PIN_LED_RED, LOW);
     return;
@@ -312,11 +349,13 @@ void updateStatusLeds() {
 
 // --- SD session logging ---
 
-float sessionDistanceM(uint32_t atMs) {
+float sessionDistanceM(uint32_t atMs)
+{
   return (float)speedCms * (float)(atMs - runStartMs) / 100000.0f;
 }
 
-void drawHomeSdStatus(StepScreenDisplay &d) {
+void drawHomeSdStatus(StepScreenDisplay &d)
+{
   const bool ready = sd.isReady();
   const int16_t sdTextW = 12; // "SD" at size 1
   const int16_t checkW = 7;
@@ -327,13 +366,16 @@ void drawHomeSdStatus(StepScreenDisplay &d) {
 
   d.setTextSize(1);
   d.setTextColor(SH110X_BLACK);
-  if (ready) {
+  if (ready)
+  {
     d.drawLine(x, 3, x + 2, 6, SH110X_BLACK);
     d.drawLine(x, 2, x + 2, 5, SH110X_BLACK);
     d.drawLine(x + 2, 6, x + 6, 1, SH110X_BLACK);
     d.drawLine(x + 2, 5, x + 6, 0, SH110X_BLACK);
     d.setCursor(x + checkW + gap, 0);
-  } else {
+  }
+  else
+  {
     d.setCursor(x, 0);
   }
   d.print(F("SD"));
@@ -342,15 +384,18 @@ void drawHomeSdStatus(StepScreenDisplay &d) {
 
 // FAT 8.3: /YYYYMMDD/HHMMSS.CSV (8-char dir + 6-char file + .CSV).
 bool formatSessionPath(char *filePath, size_t fileLen, char *dirPath,
-                       size_t dirLen) {
+                       size_t dirLen)
+{
   char ts[24];
   rtc.formatLogTimestamp(ts, sizeof(ts));
-  if (ts[0] == '\0') {
+  if (ts[0] == '\0')
+  {
     filePath[0] = '\0';
     return false;
   }
   unsigned y, mo, d, h, mi, s;
-  if (sscanf(ts, "%u-%u-%u %u:%u:%u", &y, &mo, &d, &h, &mi, &s) != 6) {
+  if (sscanf(ts, "%u-%u-%u %u:%u:%u", &y, &mo, &d, &h, &mi, &s) != 6)
+  {
     filePath[0] = '\0';
     return false;
   }
@@ -359,14 +404,17 @@ bool formatSessionPath(char *filePath, size_t fileLen, char *dirPath,
   return true;
 }
 
-void startSessionLog() {
-  if (!sd.isReady() || !rtc.isReady()) {
+void startSessionLog()
+{
+  if (!sd.isReady() || !rtc.isReady())
+  {
     return;
   }
 
   char dirPath[12];
   if (!formatSessionPath(sessionLogPath, sizeof(sessionLogPath), dirPath,
-                         sizeof(dirPath))) {
+                         sizeof(dirPath)))
+  {
     return;
   }
 
@@ -380,20 +428,23 @@ void startSessionLog() {
       payload, sizeof(payload),
       "datetime,event,speed,duration,distance_meters\n%s,begin,%d,%d,0.00\n",
       ts, sessionSpeedCms, sessionDurationMin);
-  if (n <= 0 || (size_t)n >= sizeof(payload)) {
+  if (n <= 0 || (size_t)n >= sizeof(payload))
+  {
     sessionLogPath[0] = '\0';
     return;
   }
 
   noInterrupts();
   bool ok = sd.ensureDirectory(dirPath);
-  if (ok) {
+  if (ok)
+  {
     ok = sd.writeFile(sessionLogPath, (const uint8_t *)payload, (size_t)n,
                       false);
   }
   interrupts();
 
-  if (!ok) {
+  if (!ok)
+  {
     Serial.print(F("[Log] begin failed ("));
     Serial.print(sessionLogPath);
     Serial.print(F("): "));
@@ -406,12 +457,15 @@ void startSessionLog() {
   Serial.println(sessionLogPath);
 }
 
-void finishSessionLog(const char *event) {
-  if (sessionLogPath[0] == '\0') {
+void finishSessionLog(const char *event)
+{
+  if (sessionLogPath[0] == '\0')
+  {
     return;
   }
 
-  if (!sd.isReady() || !rtc.isReady()) {
+  if (!sd.isReady() || !rtc.isReady())
+  {
     sessionLogPath[0] = '\0';
     return;
   }
@@ -426,14 +480,17 @@ void finishSessionLog(const char *event) {
   const bool ok = sd.appendLine(sessionLogPath, line);
   interrupts();
 
-  if (!ok) {
+  if (!ok)
+  {
     Serial.print(F("[Log] "));
     Serial.print(event);
     Serial.print(F(" failed ("));
     Serial.print(sessionLogPath);
     Serial.print(F("): "));
     Serial.println(sd.lastError());
-  } else {
+  }
+  else
+  {
     Serial.print(F("[Log] "));
     Serial.println(event);
   }
@@ -441,20 +498,25 @@ void finishSessionLog(const char *event) {
   sessionLogPath[0] = '\0';
 }
 
-void updateRunSdFooter() {
-  if (sessionLogPath[0] != '\0') {
+void updateRunSdFooter()
+{
+  if (sessionLogPath[0] != '\0')
+  {
     snprintf(runSdFooter, sizeof(runSdFooter), "%s", sessionLogPath + 1);
     return;
   }
-  if (!sd.cardPresent()) {
+  if (!sd.cardPresent())
+  {
     snprintf(runSdFooter, sizeof(runSdFooter), "No SD card");
     return;
   }
-  if (sd.mountState() == STEPSCREEN_SD_ERROR) {
+  if (sd.mountState() == STEPSCREEN_SD_ERROR)
+  {
     snprintf(runSdFooter, sizeof(runSdFooter), "SD mount failed");
     return;
   }
-  if (!sd.isReady()) {
+  if (!sd.isReady())
+  {
     snprintf(runSdFooter, sizeof(runSdFooter), "SD not ready");
     return;
   }
@@ -463,10 +525,12 @@ void updateRunSdFooter() {
 
 // --- Screen transitions (always via these, so nav debounce applies) ---
 
-void enterHome() {
+void enterHome()
+{
   setMotorTickActive(false);
   stepper.disable();
-  if (currentScreen == SCREEN_RUN && runPhase == PHASE_RUNNING) {
+  if (currentScreen == SCREEN_RUN && runPhase == PHASE_RUNNING)
+  {
     loggedDistanceM = sessionDistanceM(millis());
   }
   finishSessionLog("cancelled");
@@ -476,7 +540,8 @@ void enterHome() {
   Serial.println(F("[Home]"));
 }
 
-void enterRun() {
+void enterRun()
+{
   startSessionLog(); // SD before motor timer — TC3 ISR starves SPI
   updateRunSdFooter();
 
@@ -489,7 +554,8 @@ void enterRun() {
   runEndMs = runStartMs + (uint32_t)timeoutMin * 60000UL;
   displayDirty = true;
 
-  if (motorReady) {
+  if (motorReady)
+  {
     stepper.enable();
     setMotorTickActive(true);
     applyStepRate(0.0f);
@@ -507,43 +573,55 @@ void enterRun() {
 
 // --- Run screen motor service (ramp + countdown; stepping is in ISR) ---
 
-void serviceRun() {
-  if (currentScreen != SCREEN_RUN || runPhase != PHASE_RUNNING) {
+void serviceRun()
+{
+  if (currentScreen != SCREEN_RUN || runPhase != PHASE_RUNNING)
+  {
     return;
   }
 
   const uint32_t now = millis();
 
-  if (motorReady) {
+  if (motorReady)
+  {
     const float prevSps = currentSps;
 
-    if (currentSps != targetSps) {
+    if (currentSps != targetSps)
+    {
       const float step =
           TREADMILL_ACCEL_SPS2 * (float)(now - lastRampMs) / 1000.0f;
-      if (targetSps > currentSps) {
+      if (targetSps > currentSps)
+      {
         currentSps = currentSps + step;
-        if (currentSps > targetSps) {
+        if (currentSps > targetSps)
+        {
           currentSps = targetSps;
         }
-      } else {
+      }
+      else
+      {
         currentSps = currentSps - step;
-        if (currentSps < targetSps) {
+        if (currentSps < targetSps)
+        {
           currentSps = targetSps;
         }
       }
     }
     lastRampMs = now;
 
-    if (currentSps != prevSps) {
+    if (currentSps != prevSps)
+    {
       applyStepRate(currentSps);
     }
     // Exact period when ramp lands on target (threshold may have skipped last tick).
-    if (currentSps == targetSps && prevSps != targetSps) {
+    if (currentSps == targetSps && prevSps != targetSps)
+    {
       applyStepRate(currentSps, true);
     }
   }
 
-  if ((int32_t)(now - runEndMs) >= 0) {
+  if ((int32_t)(now - runEndMs) >= 0)
+  {
     setMotorTickActive(false);
     stepper.disable();
     loggedDistanceM = sessionDistanceM(now);
@@ -556,24 +634,32 @@ void serviceRun() {
 
 // --- Per-screen input handling ---
 
-void handleHome(uint8_t ev, int32_t enc) {
-  if (ev & STEPSCREEN_EVT_BACK) {
+void handleHome(uint8_t ev, int32_t enc)
+{
+  if (ev & STEPSCREEN_EVT_BACK)
+  {
     editTarget = (editTarget == EDIT_SPEED) ? EDIT_TIME : EDIT_SPEED;
     displayDirty = true;
   }
-  if (ev & STEPSCREEN_EVT_PUSH) {
+  if (ev & STEPSCREEN_EVT_PUSH)
+  {
     directionFwd = !directionFwd;
     displayDirty = true;
   }
-  if (ev & STEPSCREEN_EVT_CONFIRM) {
+  if (ev & STEPSCREEN_EVT_CONFIRM)
+  {
     enterRun();
     return;
   }
-  if (enc != 0) {
-    if (editTarget == EDIT_SPEED) {
+  if (enc != 0)
+  {
+    if (editTarget == EDIT_SPEED)
+    {
       speedCms += (int16_t)enc;
       speedCms = constrain(speedCms, SPEED_MIN_CMS, SPEED_MAX_CMS);
-    } else {
+    }
+    else
+    {
       timeoutMin += (int16_t)enc;
       timeoutMin = constrain(timeoutMin, TIME_MIN_MIN, TIME_MAX_MIN);
     }
@@ -581,12 +667,15 @@ void handleHome(uint8_t ev, int32_t enc) {
   }
 }
 
-void handleRun(uint8_t ev, int32_t enc) {
-  if (ev & STEPSCREEN_EVT_BACK) {
+void handleRun(uint8_t ev, int32_t enc)
+{
+  if (ev & STEPSCREEN_EVT_BACK)
+  {
     enterHome();
     return;
   }
-  if (enc != 0 && runPhase == PHASE_RUNNING) {
+  if (enc != 0 && runPhase == PHASE_RUNNING)
+  {
     speedCms += (int16_t)enc;
     speedCms = constrain(speedCms, SPEED_MIN_CMS, SPEED_MAX_CMS);
     updateTargetSps();
@@ -600,9 +689,11 @@ void handleRun(uint8_t ev, int32_t enc) {
 // --- Drawing ---
 
 void drawMetric(StepScreenDisplay &d, int16_t y, const char *value,
-                const char *unit, bool selected) {
+                const char *unit, bool selected)
+{
   const int16_t rowW = STEPSCREEN_CONTENT_W - 4;
-  if (selected) {
+  if (selected)
+  {
     d.fillRect(0, y - 2, rowW, 19, SH110X_WHITE);
   }
   const uint16_t fg = selected ? SH110X_BLACK : SH110X_WHITE;
@@ -618,7 +709,8 @@ void drawMetric(StepScreenDisplay &d, int16_t y, const char *value,
   d.setTextColor(SH110X_WHITE);
 }
 
-void drawHome(StepScreenDisplay &d) {
+void drawHome(StepScreenDisplay &d)
+{
   char infoBar[12];
   rtc.formatInfoBar(infoBar, sizeof(infoBar));
   d.drawInfoBar(infoBar);
@@ -641,7 +733,8 @@ void drawHome(StepScreenDisplay &d) {
   d.print(directionFwd ? "Fwd" : "Rev");
 }
 
-void drawRun(StepScreenDisplay &d) {
+void drawRun(StepScreenDisplay &d)
+{
   d.drawInfoBar("Run");
   const StepScreenActionLabels labels = {"Back", "Spd", nullptr};
   d.drawActionColumn(labels, nav.readBack(), false, false);
@@ -657,9 +750,11 @@ void drawRun(StepScreenDisplay &d) {
   d.print("cm/s ");
   d.print(directionFwd ? F("Fwd") : F("Rev"));
 
-  if (runPhase == PHASE_DONE) {
+  if (runPhase == PHASE_DONE)
+  {
     const bool inv = (millis() / 500) & 1;
-    if (inv) {
+    if (inv)
+    {
       d.fillRect(0, 34, STEPSCREEN_CONTENT_W - 4, 19, SH110X_WHITE);
       d.setTextColor(SH110X_BLACK);
     }
@@ -667,7 +762,9 @@ void drawRun(StepScreenDisplay &d) {
     d.setCursor(2, 36);
     d.print("DONE");
     d.setTextColor(SH110X_WHITE);
-  } else {
+  }
+  else
+  {
     const uint32_t now = millis();
     const uint32_t remMs = (int32_t)(runEndMs - now) > 0 ? runEndMs - now : 0;
     const uint16_t mm = remMs / 60000UL;
@@ -686,14 +783,16 @@ void drawRun(StepScreenDisplay &d) {
   d.print(buf);
 }
 
-void drawScreen() {
+void drawScreen()
+{
   static uint32_t lastDrawMs = 0;
   const bool beltRunning =
       currentScreen == SCREEN_RUN && runPhase == PHASE_RUNNING;
   const uint32_t interval =
       beltRunning ? DRAW_INTERVAL_RUNNING_MS : DRAW_INTERVAL_MS;
   const uint32_t now = millis();
-  if (!displayDirty && (now - lastDrawMs < interval)) {
+  if (!displayDirty && (now - lastDrawMs < interval))
+  {
     return;
   }
   lastDrawMs = now;
@@ -701,7 +800,8 @@ void drawScreen() {
 
   StepScreenDisplay &d = screen.display();
   d.clearDisplay();
-  switch (currentScreen) {
+  switch (currentScreen)
+  {
   case SCREEN_HOME:
     drawHome(d);
     break;
@@ -712,7 +812,8 @@ void drawScreen() {
   d.display();
 }
 
-void haltMotorDriverOffline() {
+void haltMotorDriverOffline()
+{
   StepScreenDisplay &d = screen.display();
   d.clearDisplay();
   d.drawInfoBar("Error");
@@ -732,26 +833,32 @@ void haltMotorDriverOffline() {
   Serial.println(F("Any button to skip"));
 
   StepScreenInput &in = screen.input();
-  while (true) {
+  while (true)
+  {
     in.pollButtons();
-    if (in.readBack() || in.readConfirm() || in.readPush()) {
+    if (in.readBack() || in.readConfirm() || in.readPush())
+    {
       break;
     }
     delay(20);
   }
-  while (in.readBack() || in.readConfirm() || in.readPush()) {
+  while (in.readBack() || in.readConfirm() || in.readPush())
+  {
     in.pollButtons();
     delay(20);
   }
 }
 
-void setup() {
+void setup()
+{
   Serial.begin(115200);
   delay(1000); // let USB serial settle; no while(!Serial) so battery works
 
-  if (!screen.begin()) {
+  if (!screen.begin())
+  {
     Serial.println(F("Treadmill: display not found"));
-    while (1) {
+    while (1)
+    {
       delay(100);
     }
   }
@@ -770,9 +877,12 @@ void setup() {
   motorReady = tmc.verify() && tmc.configureForStepDir(
                                    STEPSCREEN_MOTOR_MICROSTEPS,
                                    STEPSCREEN_TMC2209_RUN_CURRENT_MA);
-  if (motorReady) {
+  if (motorReady)
+  {
     tmc.driver().intpol(false);
-  } else {
+  }
+  else
+  {
     haltMotorDriverOffline();
   }
   stepper.begin();
@@ -798,15 +908,18 @@ void setup() {
   enterHome();
 }
 
-void loop() {
-  if (currentScreen == SCREEN_HOME) {
+void loop()
+{
+  if (currentScreen == SCREEN_HOME)
+  {
     sd.update();
   }
 
   serviceRun(); // speed ramp + timeout (stepping in TC3 ISR)
 
 #if !defined(ARDUINO_ARCH_SAMD)
-  if (motorTickActive) {
+  if (motorTickActive)
+  {
     stepper.runSpeed();
   }
 #endif
@@ -814,7 +927,8 @@ void loop() {
   const uint8_t ev = nav.pollNavEvents();
   const int32_t enc = nav.consumeEncoderDelta();
 
-  switch (currentScreen) {
+  switch (currentScreen)
+  {
   case SCREEN_HOME:
     handleHome(ev, enc);
     break;
